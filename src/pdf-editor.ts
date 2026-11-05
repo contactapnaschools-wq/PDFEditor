@@ -1,10 +1,12 @@
 import { LitElement, css, html, nothing, svg, type PropertyValues, type SVGTemplateResult } from 'lit';
 import { customElement, property, query, state } from 'lit/decorators.js';
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
+import { repeat } from 'lit/directives/repeat.js';
+import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from 'pdfjs-dist';
 import {
   iconChevron,
   iconComments,
   iconEmptyDoc,
+  iconEye,
   iconFilter,
   iconHand,
   iconMenu,
@@ -103,6 +105,9 @@ interface Mark {
   sortY: number;
   points: PdfPoint[];
   src: string;
+  color: string;
+  opacity: number;
+  weight: number;
   quote: string;
   author: string;
   createdAt: number;
@@ -120,6 +125,9 @@ interface MarkBox extends ViewportBox {
   text: string;
   points: Array<{ x: number; y: number }>;
   src: string;
+  color: string;
+  opacity: number;
+  weight: number;
 }
 
 interface TextEdit {
@@ -193,6 +201,13 @@ interface QuickSelection {
   quote: string;
   boxes: ViewportBox[];
 }
+
+const STYLE_SWATCHES = ['#d93025', '#e8710a', '#f6bf26', '#188038', '#129eaf', '#1a73e8', '#9334e6', '#202124'] as const;
+const STYLE_WEIGHTS: ReadonlyArray<{ id: number; label: string }> = [
+  { id: 1.25, label: 'Light' },
+  { id: 2, label: 'Regular' },
+  { id: 3.5, label: 'Heavy' },
+];
 
 const MARK_TOOLS: ReadonlyArray<{ id: MarkKind; label: string }> = [
   { id: 'highlight', label: 'Highlight' },
@@ -366,6 +381,8 @@ interface PreviewSavePicker {
 }
 
 type SettingsSection = 'theme' | 'shortcuts' | 'advanced';
+type ViewRead = 'page' | 'scroll';
+type ViewSpread = 'single' | 'pair' | 'cover';
 
 const SETTINGS_SHORTCUTS: ReadonlyArray<{ keys: string; description: string; scope: 'all' | 'pdf' | 'preview' }> = [
   { keys: 'Ctrl + O', description: 'Open a file', scope: 'all' },
@@ -548,6 +565,30 @@ export class PdfEditor extends LitElement {
       min-height: 100%;
       padding: 28px 36px 40px;
     }
+    .stage.is-flow {
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 18px;
+    }
+    .sheet-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      gap: 16px;
+    }
+    .sheet-hit {
+      position: absolute;
+      inset: 0;
+      z-index: 4;
+      padding: 0;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+    }
+    .sheet-hit:hover,
+    .sheet-hit:focus-visible { box-shadow: inset 0 0 0 2px #1a73e8; }
+    .viewer.hand .sheet-hit { cursor: grab; }
 
     .page-frame {
       position: relative;
@@ -681,15 +722,15 @@ export class PdfEditor extends LitElement {
       position: absolute;
       box-sizing: border-box;
     }
-    .mark.highlight { background: rgba(255, 214, 0, 0.45); }
-    .mark.underline { border-bottom: 2px solid #e37400; }
+    .mark.highlight { background: var(--mark-fill, rgba(246, 191, 38, 0.45)); }
+    .mark.underline { border-bottom: var(--mark-weight, 2px) solid var(--mark-ink, #e37400); }
     .mark.strike::after {
       content: "";
       position: absolute;
       left: 0;
       right: 0;
       top: 50%;
-      border-top: 2px solid #d93025;
+      border-top: var(--mark-weight, 2px) solid var(--mark-ink, #d93025);
     }
     .mark.selected { outline: 2px solid #1a73e8; outline-offset: 1px; }
     .note-pin {
@@ -1394,6 +1435,136 @@ export class PdfEditor extends LitElement {
       border-right: 1px solid #e0e3e7;
       padding: 12px 10px 24px;
     }
+    .style-panel {
+      width: 252px;
+      flex: none;
+      min-height: 0;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding: 14px 14px 20px;
+      background: #fff;
+      border-right: 1px solid #e0e3e7;
+      color: #202124;
+    }
+    .style-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .style-head h2 {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+    }
+    .style-head p {
+      margin: 2px 0 0;
+      color: #80868b;
+      font-size: 12px;
+    }
+    .style-head .icon { width: 28px; height: 28px; }
+    .style-kicker {
+      margin: 0 0 8px;
+      color: #80868b;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .style-kinds, .style-weights {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .style-kinds button, .style-weights button, .style-actions button, .style-more-toggle {
+      border: 1px solid #e0e3e7;
+      border-radius: 8px;
+      background: #fff;
+      color: #202124;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .style-kinds button, .style-weights button {
+      height: 30px;
+      padding: 0 10px;
+    }
+    .style-kinds button[aria-checked='true'],
+    .style-weights button[aria-checked='true'] {
+      border-color: #1a73e8;
+      background: #e8f0fe;
+      color: #1a73e8;
+    }
+    .style-chips {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+    }
+    .style-chip {
+      height: 28px;
+      padding: 0;
+      border: 2px solid transparent;
+      border-radius: 8px;
+      cursor: pointer;
+      box-shadow: inset 0 0 0 1px rgba(32, 33, 36, 0.12);
+    }
+    .style-chip[aria-checked='true'] {
+      border-color: #1a73e8;
+      box-shadow: inset 0 0 0 2px #fff;
+    }
+    .style-custom {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      color: #5f6368;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .style-custom input {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      background: transparent;
+      cursor: pointer;
+    }
+    .style-opacity {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .style-opacity input[type='range'] { flex: 1; accent-color: #1a73e8; }
+    .style-opacity input[type='number'] {
+      width: 58px;
+      height: 30px;
+      padding: 0 6px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      color: #202124;
+      font-size: 12px;
+    }
+    .style-actions { display: flex; gap: 8px; }
+    .style-actions button {
+      flex: 1;
+      height: 32px;
+    }
+    .style-actions button:hover:not(:disabled),
+    .style-kinds button:hover,
+    .style-weights button:hover,
+    .style-more-toggle:hover { background: #f4f6f8; }
+    .style-actions button:disabled { color: #bdc1c6; cursor: default; }
+    .style-actions .danger { color: #d93025; }
+    .style-actions .danger:disabled { color: #bdc1c6; }
+    .style-more-toggle {
+      width: 100%;
+      height: 32px;
+      text-align: left;
+      padding: 0 10px;
+    }
+    .style-more { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
     .pages-empty {
       margin: 24px 8px;
       color: #80868b;
@@ -1810,6 +1981,34 @@ export class PdfEditor extends LitElement {
     .preview-dark .viewer,
     .preview-dark .pages { background: #202124; }
     .preview-dark .pages { border-right-color: #3c4043; }
+    .preview-dark .style-panel {
+      background: #292a2d;
+      border-right-color: #3c4043;
+      color: #e8eaed;
+    }
+    .preview-dark .style-head p,
+    .preview-dark .style-kicker,
+    .preview-dark .style-custom { color: #9aa0a6; }
+    .preview-dark .style-kinds button,
+    .preview-dark .style-weights button,
+    .preview-dark .style-actions button,
+    .preview-dark .style-more-toggle,
+    .preview-dark .style-opacity input[type='number'] {
+      background: #202124;
+      border-color: #3c4043;
+      color: #e8eaed;
+    }
+    .preview-dark .style-kinds button[aria-checked='true'],
+    .preview-dark .style-weights button[aria-checked='true'] {
+      background: #3c4043;
+      border-color: #8ab4f8;
+      color: #8ab4f8;
+    }
+    .preview-dark .style-actions .danger { color: #f28b82; }
+    .preview-dark .style-kinds button:hover,
+    .preview-dark .style-weights button:hover,
+    .preview-dark .style-actions button:hover:not(:disabled),
+    .preview-dark .style-more-toggle:hover { background: #3c4043; }
     .preview-dark .toolbar { border-bottom-color: #3c4043; }
     .preview-dark .sep,
     .preview-dark .popup .rule,
@@ -1823,6 +2022,28 @@ export class PdfEditor extends LitElement {
     .preview-dark .tab:hover { background: #3c4043; }
     .preview-dark .icon[aria-pressed='true'] { color: #8ab4f8; background: #3c4043; }
     .popup.file-menu { min-width: 220px; }
+    .popup.view-menu {
+      min-width: 236px;
+      max-height: min(72vh, 540px);
+      overflow: auto;
+    }
+    .view-heading {
+      margin: 0;
+      padding: 8px 14px 2px;
+      color: #80868b;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .popup.view-menu button[aria-checked='true'] { background: #eef3fd; }
+    .popup.view-menu button[aria-checked='true']:hover:not(:disabled) { background: #e4edfc; }
+    .preview-dark .view-heading { color: #9aa0a6; }
+    .preview-dark .popup button[aria-checked='true'] { color: #8ab4f8; }
+    .preview-dark .popup.view-menu button[aria-checked='true'] { background: #30343a; }
+    .preview-dark .popup.view-menu button[aria-checked='true']:hover:not(:disabled) { background: #3c4043; }
+    .preview-dark .sheet-hit:hover,
+    .preview-dark .sheet-hit:focus-visible { box-shadow: inset 0 0 0 2px #8ab4f8; }
     .menu-item { display: inline-flex; align-items: center; gap: 10px; }
     .popup button svg,
     .menu-item svg { width: 16px; height: 16px; flex: none; }
@@ -2174,6 +2395,10 @@ export class PdfEditor extends LitElement {
   @state() private askBeforeLinks = true;
   @state() private showSelectionTools = true;
   @state() private highlightFormFields = true;
+  @state() private viewMenuOpen = false;
+  @state() private viewRead: ViewRead = 'page';
+  @state() private viewSpread: ViewSpread = 'single';
+  @state() private viewTurn = 0;
   @state() private previewTheme: 'light' | 'dark' = 'light';
   @state() private menuOpen = false;
   @state() private zoomOpen = false;
@@ -2226,6 +2451,11 @@ export class PdfEditor extends LitElement {
   @state() private freeTextBox: { left: number; top: number; width: number; height: number } | null = null;
   @state() private textSelection: QuickSelection | null = null;
   @state() private styleMenuOpen = false;
+  @state() private styleMoreOpen = false;
+  @state() private styleTouched = false;
+  @state() private styleColor = '#f6bf26';
+  @state() private styleOpacity = 0.45;
+  @state() private styleWeight = 2;
   @state() private replyText = '';
 
   @query('.viewer') private viewerEl!: HTMLElement;
@@ -2235,11 +2465,15 @@ export class PdfEditor extends LitElement {
   @query('.menu-root') private menuRoot!: HTMLElement;
   @query('.zoom-root') private zoomRoot!: HTMLElement;
   @query('.search-root') private searchRoot!: HTMLElement;
+  @query('.view-root') private viewRoot!: HTMLElement;
   @query('.pages') private pagesEl!: HTMLElement;
 
   private pdf: PDFDocumentProxy | null = null;
   private renderTask: RenderTask | null = null;
+  private sideTasks: RenderTask[] = [];
   private renderToken = 0;
+  private sheetScrollLock = false;
+  private scrollSpyFrame = 0;
   private loadId = 0;
   private dragDepth = 0;
   private resetScroll = false;
@@ -2297,6 +2531,8 @@ export class PdfEditor extends LitElement {
     this.cancelThumbnails();
     this.renderToken += 1;
     this.renderTask?.cancel();
+    this.cancelSideSheets();
+    if (this.scrollSpyFrame) cancelAnimationFrame(this.scrollSpyFrame);
     void this.pdf?.loadingTask.destroy();
     this.pdf = null;
     this.clearImagePreview();
@@ -2342,6 +2578,21 @@ export class PdfEditor extends LitElement {
         const ok = this.renderRoot.querySelector('.word-dialog .primary');
         if (ok instanceof HTMLElement) ok.focus();
       });
+    }
+    if (changed.has('viewTurn') && changed.get('viewTurn') !== undefined) {
+      this.thumbsPainted.clear();
+      this.thumbsPending.clear();
+      this.cancelThumbnails();
+      if (this.pagesPressed) {
+        void this.updateComplete.then(() => this.observeThumbnails());
+      }
+    }
+    if (
+      this.pdf &&
+      !this.isReadOnlyPreview() &&
+      (changed.has('viewRead') || changed.has('viewSpread') || changed.has('viewTurn'))
+    ) {
+      this.scheduleRender();
     }
     if (changed.has('pagesPressed') || changed.has('totalPages')) {
       this.thumbsPainted.clear();
@@ -2457,6 +2708,7 @@ export class PdfEditor extends LitElement {
     this.renderToken += 1;
     this.renderTask?.cancel();
     this.renderTask = null;
+    this.cancelSideSheets();
     const previous = this.pdf;
     this.pdf = null;
     this.totalPages = 0;
@@ -2684,6 +2936,7 @@ export class PdfEditor extends LitElement {
     this.renderToken += 1;
     this.renderTask?.cancel();
     this.renderTask = null;
+    this.cancelSideSheets();
     const previous = this.pdf;
     this.pdf = null;
     void previous?.loadingTask.destroy();
@@ -2826,6 +3079,7 @@ export class PdfEditor extends LitElement {
     this.menuOpen = false;
     this.zoomOpen = false;
     this.searchOpen = false;
+    this.viewMenuOpen = false;
     this.previewSettingsOpen = true;
   }
 
@@ -2836,6 +3090,7 @@ export class PdfEditor extends LitElement {
   private toggleWordFullScreen(): void {
     this.wordMenuOpen = false;
     this.menuOpen = false;
+    this.viewMenuOpen = false;
     if (document.fullscreenElement === this) {
       void document.exitFullscreen();
       return;
@@ -3007,6 +3262,7 @@ export class PdfEditor extends LitElement {
       event.preventDefault();
       this.menuOpen = false;
       this.zoomOpen = false;
+      this.viewMenuOpen = false;
       this.searchOpen = true;
       void this.updateComplete.then(() => {
         const input = this.renderRoot.querySelector('.search-pop input');
@@ -3474,6 +3730,9 @@ export class PdfEditor extends LitElement {
         points: mark.points,
         image: image?.bytes,
         imageType: image?.type,
+        color: mark.color,
+        opacity: mark.opacity,
+        weight: mark.weight,
       });
     }
     return applyMarks(await this.ensureBytes(), drawn);
@@ -3650,6 +3909,7 @@ export class PdfEditor extends LitElement {
     const token = ++this.renderToken;
     this.renderTask?.cancel();
     this.renderTask = null;
+    this.cancelSideSheets();
     requestAnimationFrame(() => {
       void this.renderCurrent(token);
     });
@@ -3663,11 +3923,11 @@ export class PdfEditor extends LitElement {
     if (viewer.clientWidth < 40 || viewer.clientHeight < 40) return;
 
     try {
-      const size = await pageSizeAtScale1(pdf, this.currentPage);
+      const size = await pageSizeAtScale1(pdf, this.currentPage, this.viewTurn);
       if (token !== this.renderToken) return;
       const scale = this.scaleFor(size.width, size.height, viewer);
       this.scale = scale;
-      const task = await paintPage(pdf, this.currentPage, canvas, scale);
+      const task = await paintPage(pdf, this.currentPage, canvas, scale, this.viewTurn);
       if (token !== this.renderToken) {
         task.cancel();
         return;
@@ -3683,6 +3943,9 @@ export class PdfEditor extends LitElement {
       if (token !== this.renderToken) return;
       await this.refreshFormFields();
       if (token !== this.renderToken) return;
+      await this.paintSideSheets(pdf, scale, token);
+      if (token !== this.renderToken) return;
+      canvas.dataset.sheetStamp = `${this.viewTurn}:${scale.toFixed(4)}`;
       this.pageReady = true;
       this.renderTask = null;
       if (this.resetScroll) {
@@ -3707,10 +3970,150 @@ export class PdfEditor extends LitElement {
 
   private scaleFor(width: number, height: number, viewer: HTMLElement): number {
     if (this.zoomMode === 'percent') return this.zoomPercent;
-    const availableWidth = Math.max(viewer.clientWidth - 72, 120);
+    const columns = Math.max(1, this.spreadColumns());
+    const gap = columns > 1 ? 16 * (columns - 1) : 0;
+    const availableWidth = Math.max((viewer.clientWidth - 72 - gap) / columns, 80);
     const availableHeight = Math.max(viewer.clientHeight - 68, 120);
     if (this.zoomMode === 'fit-width') return availableWidth / width;
     return Math.min(availableWidth / width, availableHeight / height);
+  }
+
+  private viewportOf(page: PDFPageProxy, scale = this.scale) {
+    const rotation = (((page.rotate || 0) + this.viewTurn * 90) % 360 + 360) % 360;
+    return page.getViewport({ scale, rotation });
+  }
+
+  private sheetRows(): number[][] {
+    const total = this.totalPages;
+    if (total < 1) return [];
+    if (this.viewSpread === 'single') return Array.from({ length: total }, (_, index) => [index + 1]);
+    const rows: number[][] = [];
+    let page = 1;
+    if (this.viewSpread === 'cover') {
+      rows.push([1]);
+      page = 2;
+    }
+    for (; page <= total; page += 2) {
+      const row = [page];
+      if (page + 1 <= total) row.push(page + 1);
+      rows.push(row);
+    }
+    return rows;
+  }
+
+  private visibleRows(): number[][] {
+    const rows = this.sheetRows();
+    if (rows.length === 0) return [[Math.max(this.currentPage, 1)]];
+    if (this.viewRead === 'scroll') return rows;
+    const index = rows.findIndex((row) => row.includes(this.currentPage));
+    return [rows[index < 0 ? 0 : index]];
+  }
+
+  private spreadColumns(): number {
+    return this.sheetRows().reduce((max, row) => Math.max(max, row.length), 1);
+  }
+
+  private cancelSideSheets(): void {
+    for (const task of this.sideTasks) {
+      try {
+        task.cancel();
+      } catch {
+        /* The task may already have finished. */
+      }
+    }
+    this.sideTasks = [];
+  }
+
+  private async paintSideSheets(pdf: PDFDocumentProxy, scale: number, token: number): Promise<void> {
+    const stamp = `${this.viewTurn}:${scale.toFixed(4)}`;
+    const canvases = this.renderRoot.querySelectorAll('canvas.sheet-canvas');
+    for (const node of canvases) {
+      if (!(node instanceof HTMLCanvasElement)) continue;
+      if (node.dataset.sheetStamp === stamp && node.width > 0) continue;
+      const page = Number(node.dataset.sheetCanvas);
+      if (!page || token !== this.renderToken) return;
+      try {
+        const task = await paintPage(pdf, page, node, scale, this.viewTurn);
+        if (token !== this.renderToken) {
+          task.cancel();
+          return;
+        }
+        this.sideTasks.push(task);
+        await task.promise;
+        node.dataset.sheetStamp = stamp;
+        this.sideTasks = this.sideTasks.filter((item) => item !== task);
+      } catch (error) {
+        if (isRenderCancel(error) || token !== this.renderToken) return;
+      }
+    }
+  }
+
+  private onViewerScroll = (): void => {
+    if (this.viewRead !== 'scroll' || this.sheetScrollLock) return;
+    if (this.scrollSpyFrame) return;
+    this.scrollSpyFrame = requestAnimationFrame(() => {
+      this.scrollSpyFrame = 0;
+      this.syncPageFromScroll();
+    });
+  };
+
+  private syncPageFromScroll(): void {
+    if (this.viewRead !== 'scroll' || this.sheetScrollLock || !this.viewerEl) return;
+    const view = this.viewerEl.getBoundingClientRect();
+    let best = this.currentPage;
+    let bestOverlap = 0;
+    this.renderRoot.querySelectorAll('[data-sheet]').forEach((node) => {
+      if (!(node instanceof HTMLElement)) return;
+      const page = Number(node.dataset.sheet);
+      if (!page) return;
+      const box = node.getBoundingClientRect();
+      const overlap = Math.min(box.bottom, view.bottom) - Math.max(box.top, view.top);
+      if (overlap > bestOverlap) {
+        best = page;
+        bestOverlap = overlap;
+      }
+    });
+    if (best !== this.currentPage && bestOverlap > 0) {
+      this.currentPage = best;
+      this.scheduleRender();
+    }
+  }
+
+  private setViewRead(mode: ViewRead): void {
+    this.viewMenuOpen = false;
+    if (this.viewRead === mode) return;
+    this.viewRead = mode;
+    if (mode === 'page') this.resetScroll = true;
+  }
+
+  private setViewSpread(mode: ViewSpread): void {
+    this.viewMenuOpen = false;
+    if (this.viewSpread === mode) return;
+    this.viewSpread = mode;
+    if (this.viewRead === 'page') this.resetScroll = true;
+  }
+
+  private turnView(direction: 1 | -1 | 0): void {
+    this.viewMenuOpen = false;
+    const next = direction === 0 ? 0 : (this.viewTurn + direction + 4) % 4;
+    if (next === this.viewTurn) return;
+    this.viewTurn = next;
+    if (this.viewRead === 'page') this.resetScroll = true;
+  }
+
+  private chooseFit(mode: 'fit-page' | 'fit-width'): void {
+    this.viewMenuOpen = false;
+    this.setFit(mode);
+  }
+
+  private actualSize(): void {
+    this.viewMenuOpen = false;
+    this.setPercent(1);
+  }
+
+  private togglePageList(): void {
+    this.pagesPressed = !this.pagesPressed;
+    this.viewMenuOpen = false;
   }
 
   private setPercent(value: number): void {
@@ -3739,7 +4142,11 @@ export class PdfEditor extends LitElement {
     if (!this.pdf) return;
     const next = Math.min(this.totalPages, Math.max(1, page));
     this.menuOpen = false;
+    this.viewMenuOpen = false;
     if (next === this.currentPage) return;
+    const staying =
+      this.viewRead === 'scroll' ||
+      this.sheetRows().some((row) => row.includes(this.currentPage) && row.includes(next));
     this.highlights = [];
     this.noteDraft = null;
     this.linkPageInput = '';
@@ -3757,8 +4164,22 @@ export class PdfEditor extends LitElement {
     this.draftArrow = 'none';
     this.polygonHover = null;
     this.currentPage = next;
-    this.pageReady = false;
-    this.resetScroll = true;
+    if (staying) {
+      this.resetScroll = false;
+      if (this.viewRead === 'scroll') {
+        this.sheetScrollLock = true;
+        const target = next;
+        void this.updateComplete.then(() => {
+          this.renderRoot.querySelector(`[data-sheet="${target}"]`)?.scrollIntoView({ block: 'start', inline: 'nearest' });
+          window.setTimeout(() => {
+            this.sheetScrollLock = false;
+          }, 80);
+        });
+      }
+    } else {
+      this.pageReady = false;
+      this.resetScroll = true;
+    }
     this.scheduleRender();
   }
 
@@ -3840,7 +4261,7 @@ export class PdfEditor extends LitElement {
     const pdf = this.pdf;
     if (!pdf || this.textMatches.length === 0) return [];
     const page = await pdf.getPage(this.currentPage);
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const boxes: Array<ViewportBox & { active: boolean }> = [];
     this.textMatches.forEach((match, index) => {
       if (match.page !== this.currentPage) return;
@@ -3886,9 +4307,9 @@ export class PdfEditor extends LitElement {
     const token = this.thumbToken;
     this.thumbsPending.add(pageNumber);
     try {
-      const size = await pageSizeAtScale1(pdf, pageNumber);
+      const size = await pageSizeAtScale1(pdf, pageNumber, this.viewTurn);
       if (token !== this.thumbToken || this.pdf !== pdf) return;
-      const task = await paintPage(pdf, pageNumber, canvas, 120 / size.width);
+      const task = await paintPage(pdf, pageNumber, canvas, 120 / size.width, this.viewTurn);
       if (token !== this.thumbToken || this.pdf !== pdf) {
         task.cancel();
         return;
@@ -3962,6 +4383,11 @@ export class PdfEditor extends LitElement {
       this.menuOpen = false;
       this.zoomOpen = false;
       this.searchOpen = false;
+      this.viewMenuOpen = false;
+      if (this.styleMenuOpen) {
+        this.styleMenuOpen = false;
+        this.styleMoreOpen = false;
+      }
       return;
     }
     if (this.previewSettingsOpen) return;
@@ -4001,6 +4427,7 @@ export class PdfEditor extends LitElement {
     if (this.menuOpen && this.menuRoot && !path.includes(this.menuRoot)) this.menuOpen = false;
     if (this.zoomOpen && this.zoomRoot && !path.includes(this.zoomRoot)) this.zoomOpen = false;
     if (this.searchOpen && this.searchRoot && !path.includes(this.searchRoot)) this.searchOpen = false;
+    if (this.viewMenuOpen && this.viewRoot && !path.includes(this.viewRoot)) this.viewMenuOpen = false;
     if (this.commentMenuId || this.statusMenuId) {
       const inside = path.some(
         (node) => node instanceof HTMLElement && (node.classList.contains('comment-menu') || node.classList.contains('comment-menu-btn')),
@@ -4011,6 +4438,7 @@ export class PdfEditor extends LitElement {
 
   private onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
+    if (this.eventIn(event, '.sheet-hit') && this.tool !== 'hand') return;
     if (
       this.eventIn(event, '.note-box') ||
       this.eventIn(event, '.freetext-editor') ||
@@ -4393,7 +4821,7 @@ export class PdfEditor extends LitElement {
     const pageNumber = this.currentPage;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf || this.currentPage !== pageNumber || !this.canEditText) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const lines = await pageTextLines(pdf, pageNumber);
     if (this.pdf !== pdf || this.currentPage !== pageNumber || !this.canEditText) return;
     this.lineBoxes = lines.map((line) => {
@@ -4419,7 +4847,7 @@ export class PdfEditor extends LitElement {
     const scale = this.scale;
     const page = await pdf.getPage(pageNumber);
     if (!visible() || this.currentPage !== pageNumber || this.scale !== scale) return;
-    const viewport = page.getViewport({ scale });
+    const viewport = this.viewportOf(page, scale);
     const fields = await pageFormFields(pdf, pageNumber);
     if (!visible() || this.currentPage !== pageNumber || this.scale !== scale) return;
     this.fieldBoxes = fields.map((field) => ({ ...projectRect(viewport, field.rect), kind: field.kind, name: field.name, value: field.value, checked: field.checked }));
@@ -4483,8 +4911,8 @@ export class PdfEditor extends LitElement {
     if (!pdf) return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf || this.formKind !== kind) return;
-    const from = viewportToPdf(page.getViewport({ scale: this.scale }), start.x, start.y);
-    const to = viewportToPdf(page.getViewport({ scale: this.scale }), end.x, end.y);
+    const from = viewportToPdf(this.viewportOf(page), start.x, start.y);
+    const to = viewportToPdf(this.viewportOf(page), end.x, end.y);
     const rect = pdfRectFromPoints(from.x, from.y, to.x, to.y);
     try {
       const bytes = await this.ensureBytes();
@@ -4606,7 +5034,7 @@ export class PdfEditor extends LitElement {
     const pageNumber = this.currentPage;
     if (!pdf) return;
     const page = await pdf.getPage(pageNumber);
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const from = viewportToPdf(viewport, start.x, start.y);
     const to = viewportToPdf(viewport, end.x, end.y);
     const drag = pdfRectFromPoints(from.x, from.y, to.x, to.y);
@@ -4636,7 +5064,7 @@ export class PdfEditor extends LitElement {
     if (!pdf || this.markupKind !== 'note') return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf || token !== this.selectionToken || this.markupKind !== 'note') return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const from = viewportToPdf(viewport, start.x, start.y);
     const to = viewportToPdf(viewport, end.x, end.y);
     const drag = pdfRectFromPoints(from.x, from.y, to.x, to.y);
@@ -4684,7 +5112,7 @@ export class PdfEditor extends LitElement {
     const height = distance >= 8 ? Math.max(Math.abs(end.y - start.y), 32) : 40;
     void pdf.getPage(pageNumber).then((page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.markupKind !== 'freetext') return;
-      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), left, top);
+      const pdfPoint = viewportToPdf(this.viewportOf(page), left, top);
       this.freeTextBox = { left, top, width, height };
       this.noteDraft = {
         kind: 'freetext',
@@ -4730,7 +5158,7 @@ export class PdfEditor extends LitElement {
     if (!pdf) return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf || token !== this.quickToken) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const from = viewportToPdf(viewport, start.x, start.y);
     const to = viewportToPdf(viewport, end.x, end.y);
     const drag = pdfRectFromPoints(from.x, from.y, to.x, to.y);
@@ -4790,17 +5218,6 @@ export class PdfEditor extends LitElement {
       createdAt: Date.now(),
     };
     this.textSelection = null;
-  }
-
-  private applySelectionStyle(kind: 'highlight' | 'underline' | 'strike'): void {
-    const selection = this.textSelection;
-    if (!selection) return;
-    const mark = this.makeMark(kind, selection.page, selection.rects, selection.quote);
-    this.marks = [...this.marks, mark];
-    this.selectedMarkId = mark.id;
-    this.textSelection = null;
-    this.styleMenuOpen = false;
-    void this.refreshMarkBoxes();
   }
 
   private linkOnSelection(): void {
@@ -4868,6 +5285,258 @@ export class PdfEditor extends LitElement {
     `;
   }
 
+  private defaultInk(kind: MarkKind): { color: string; opacity: number; weight: number } {
+    if (kind === 'highlight') return { color: '#f6bf26', opacity: 0.45, weight: 2 };
+    if (kind === 'underline') return { color: '#e37400', opacity: 1, weight: 2 };
+    if (kind === 'strike') return { color: '#d93025', opacity: 1, weight: 2 };
+    return { color: '#202124', opacity: 1, weight: 2 };
+  }
+
+  private fadeColor(hex: string, opacity: number): string {
+    const match = /^#([0-9a-f]{6})$/i.exec(hex);
+    const amount = Math.min(1, Math.max(0, opacity));
+    if (!match) return hex;
+    const value = Number.parseInt(match[1], 16);
+    return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${amount})`;
+  }
+
+  private isTextStyle(kind: MarkKind): kind is 'highlight' | 'underline' | 'strike' {
+    return kind === 'highlight' || kind === 'underline' || kind === 'strike';
+  }
+
+  private styleTarget(): Mark | undefined {
+    const marks = this.marks.filter((mark) => this.selectionMarkupIds().includes(mark.id) && this.isTextStyle(mark.kind));
+    return marks.find((mark) => mark.id === this.selectedMarkId) ?? marks.at(-1);
+  }
+
+  private styleLook(): { kind: 'highlight' | 'underline' | 'strike' | null; color: string; opacity: number; weight: number } {
+    const mark = this.styleTarget();
+    if (mark && this.isTextStyle(mark.kind)) {
+      return { kind: mark.kind, color: mark.color, opacity: mark.opacity, weight: mark.weight };
+    }
+    return { kind: null, color: this.styleColor, opacity: this.styleOpacity, weight: this.styleWeight };
+  }
+
+  private updateStyleMark(patch: Partial<Pick<Mark, 'kind' | 'color' | 'opacity' | 'weight'>>): void {
+    const target = this.styleTarget();
+    if (!target) return;
+    this.marks = this.marks.map((mark) => (mark.id === target.id ? { ...mark, ...patch, modifiedAt: Date.now() } : mark));
+    void this.refreshMarkBoxes();
+  }
+
+  private chooseStyleKind(kind: 'highlight' | 'underline' | 'strike'): void {
+    const selection = this.textSelection;
+    if (!selection) return;
+    if (this.styleTarget()) {
+      this.updateStyleMark({ kind });
+      return;
+    }
+    const mark = this.makeMark(kind, selection.page, selection.rects, selection.quote);
+    mark.quote = selection.quote;
+    if (this.styleTouched) {
+      mark.color = this.styleColor;
+      mark.opacity = this.styleOpacity;
+      mark.weight = this.styleWeight;
+    }
+    this.marks = [...this.marks, mark];
+    this.selectedMarkId = mark.id;
+    void this.refreshMarkBoxes();
+  }
+
+  private setStyleColor(color: string): void {
+    const next = color.toLowerCase();
+    if (!this.styleTarget()) {
+      this.styleTouched = true;
+      this.styleColor = next;
+      return;
+    }
+    this.updateStyleMark({ color: next });
+  }
+
+  private setStyleOpacity(opacity: number): void {
+    if (!Number.isFinite(opacity)) return;
+    const next = Math.min(1, Math.max(0.05, opacity));
+    if (!this.styleTarget()) {
+      this.styleTouched = true;
+      this.styleOpacity = next;
+      return;
+    }
+    this.updateStyleMark({ opacity: next });
+  }
+
+  private setStyleWeight(weight: number): void {
+    if (!this.styleTarget()) {
+      this.styleTouched = true;
+      this.styleWeight = weight;
+      return;
+    }
+    this.updateStyleMark({ weight });
+  }
+
+  private copyStyleMark(): void {
+    const target = this.styleTarget();
+    if (!target) return;
+    const rects = target.rects.map((rect) => ({ ...rect, y: rect.y - 4 }));
+    const copy: Mark = {
+      ...target,
+      id: `mark-${++this.markSeq}`,
+      rects,
+      points: target.points.map((point) => ({ ...point })),
+      sortY: rects.length > 0 ? Math.max(...rects.map((rect) => rect.y + rect.height)) : target.sortY,
+      replies: [],
+      createdAt: Date.now(),
+      modifiedAt: Date.now(),
+    };
+    this.marks = [...this.marks, copy];
+    this.selectedMarkId = copy.id;
+    void this.refreshMarkBoxes();
+  }
+
+  private styleKindLabel(kind: 'highlight' | 'underline' | 'strike' | null): string {
+    if (kind === 'highlight') return 'Highlight';
+    if (kind === 'underline') return 'Underline';
+    if (kind === 'strike') return 'Strikethrough';
+    return 'Choose a mark';
+  }
+
+  private stylePanel() {
+    if (!this.styleMenuOpen || !this.textSelection) return null;
+    const look = this.styleLook();
+    const percent = Math.round(look.opacity * 100);
+    const hasMark = look.kind !== null;
+    return html`
+      <aside class="style-panel" aria-label="Text style">
+        <div class="style-head">
+          <div>
+            <h2>Text style</h2>
+            <p>${this.styleKindLabel(look.kind)}</p>
+          </div>
+          <button
+            class="icon"
+            type="button"
+            aria-label="Close style"
+            @click=${() => {
+              this.styleMenuOpen = false;
+              this.styleMoreOpen = false;
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+              <path d="M7 7l10 10M17 7 7 17"></path>
+            </svg>
+          </button>
+        </div>
+        <section>
+          <p class="style-kicker">Mark</p>
+          <div class="style-kinds" role="radiogroup" aria-label="Mark">
+            ${MARK_TOOLS.filter((item) => this.isTextStyle(item.id)).map(
+              (item) => html`
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked=${look.kind === item.id}
+                  @click=${() => this.chooseStyleKind(item.id as 'highlight' | 'underline' | 'strike')}
+                >
+                  ${item.label}
+                </button>
+              `,
+            )}
+          </div>
+        </section>
+        <section>
+          <p class="style-kicker">Color</p>
+          <div class="style-chips" role="radiogroup" aria-label="Color">
+            ${STYLE_SWATCHES.map(
+              (color) => html`
+                <button
+                  class="style-chip"
+                  type="button"
+                  role="radio"
+                  aria-label=${color}
+                  aria-checked=${look.color.toLowerCase() === color}
+                  style="background:${color}"
+                  @click=${() => this.setStyleColor(color)}
+                ></button>
+              `,
+            )}
+          </div>
+          <label class="style-custom">
+            <input
+              type="color"
+              aria-label="Custom color"
+              .value=${/^#[0-9a-f]{6}$/i.test(look.color) ? look.color : '#f6bf26'}
+              @input=${(event: Event) => this.setStyleColor((event.target as HTMLInputElement).value)}
+            />
+            Custom
+          </label>
+        </section>
+        <section>
+          <p class="style-kicker">Opacity</p>
+          <div class="style-opacity">
+            <input
+              type="range"
+              min="5"
+              max="100"
+              aria-label="Opacity"
+              .value=${String(percent)}
+              @input=${(event: Event) => this.setStyleOpacity(Number((event.target as HTMLInputElement).value) / 100)}
+            />
+            <input
+              type="number"
+              min="5"
+              max="100"
+              aria-label="Opacity percent"
+              .value=${String(percent)}
+              @input=${(event: Event) => this.setStyleOpacity(Number((event.target as HTMLInputElement).value) / 100)}
+            />
+          </div>
+        </section>
+        <div class="style-actions">
+          <button class="danger" type="button" ?disabled=${!hasMark} @click=${() => {
+            const target = this.styleTarget();
+            if (target) this.deleteMark(target.id);
+          }}>Remove</button>
+          <button type="button" ?disabled=${!hasMark} @click=${() => this.copyStyleMark()}>Copy</button>
+        </div>
+        <section>
+          <button
+            class="style-more-toggle"
+            type="button"
+            aria-expanded=${this.styleMoreOpen}
+            @click=${() => {
+              this.styleMoreOpen = !this.styleMoreOpen;
+            }}
+          >
+            ${this.styleMoreOpen ? 'Fewer options' : 'More options'}
+          </button>
+          ${this.styleMoreOpen
+            ? html`
+                <div class="style-more">
+                  <div>
+                    <p class="style-kicker">Line weight</p>
+                    <div class="style-weights" role="radiogroup" aria-label="Line weight">
+                      ${STYLE_WEIGHTS.map(
+                        (item) => html`
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked=${Math.abs(look.weight - item.id) < 0.01}
+                            ?disabled=${look.kind === 'highlight'}
+                            @click=${() => this.setStyleWeight(item.id)}
+                          >
+                            ${item.label}
+                          </button>
+                        `,
+                      )}
+                    </div>
+                  </div>
+                </div>
+              `
+            : null}
+        </section>
+      </aside>
+    `;
+  }
+
   private quickSelectionUi() {
     const selection = this.textSelection;
     if (!selection || selection.page !== this.currentPage || selection.boxes.length === 0) return nothing;
@@ -4883,7 +5552,6 @@ export class PdfEditor extends LitElement {
       return Math.min(pageWidth - half - 6, Math.max(half + 6, preferred));
     };
     const barLeft = place(center, 90);
-    const styleLeft = place(center, 84);
     const canDelete = this.selectionMarkupIds().length > 0;
     return html`
       ${selection.boxes.map(
@@ -4910,6 +5578,11 @@ export class PdfEditor extends LitElement {
           aria-pressed=${this.styleMenuOpen}
           @click=${() => {
             this.styleMenuOpen = !this.styleMenuOpen;
+            this.styleMoreOpen = false;
+            if (!this.styleMenuOpen) return;
+            this.styleTouched = false;
+            const target = this.styleTarget();
+            if (target) this.selectedMarkId = target.id;
           }}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -4942,24 +5615,6 @@ export class PdfEditor extends LitElement {
           </svg>
         </button>
       </div>
-      ${this.styleMenuOpen
-        ? html`
-            <div class="quick-styles" style="left:${styleLeft}px;top:${bottom + 64}px">
-              <button type="button" @click=${() => this.applySelectionStyle('highlight')}>
-                <span class="style-swatch" style="background:#f9ab00"></span>
-                Highlight
-              </button>
-              <button type="button" @click=${() => this.applySelectionStyle('underline')}>
-                <span class="style-swatch" style="background:#e37400"></span>
-                Underline
-              </button>
-              <button type="button" @click=${() => this.applySelectionStyle('strike')}>
-                <span class="style-swatch" style="background:#d93025"></span>
-                Strikethrough
-              </button>
-            </div>
-          `
-        : nothing}
       `
         : nothing}
     `;
@@ -4973,7 +5628,7 @@ export class PdfEditor extends LitElement {
       if (this.pdf !== pdf || this.currentPage !== pageNumber) return;
       if (kind === 'text' && this.insertKind !== 'text') return;
       if (kind === 'initials' && this.signKind !== 'initials') return;
-      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), point.x, point.y);
+      const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
       this.noteDraft = {
         kind,
         page: pageNumber,
@@ -4998,7 +5653,7 @@ export class PdfEditor extends LitElement {
     if (!pdf) return;
     void pdf.getPage(pageNumber).then((page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber) return;
-      const viewport = page.getViewport({ scale: this.scale });
+      const viewport = this.viewportOf(page);
       const tip = viewportToPdf(viewport, start.x, start.y);
       const label = viewportToPdf(viewport, end.x, end.y);
       this.noteDraft = {
@@ -5025,7 +5680,7 @@ export class PdfEditor extends LitElement {
     if (!pdf || points.length < 2) return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const pdfPoints = points.map((point) => viewportToPdf(viewport, point.x, point.y));
     const xs = pdfPoints.map((point) => point.x);
     const ys = pdfPoints.map((point) => point.y);
@@ -5049,7 +5704,7 @@ export class PdfEditor extends LitElement {
     const text = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     void pdf.getPage(pageNumber).then((page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.signKind !== 'date') return;
-      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), point.x, point.y);
+      const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
       const mark = this.makeMark('date', pageNumber, [{ x: pdfPoint.x, y: pdfPoint.y, width: 0.01, height: 0.01 }], text);
       this.marks = [...this.marks, mark];
       this.selectedMarkId = mark.id;
@@ -5089,7 +5744,7 @@ export class PdfEditor extends LitElement {
     if (!pdf || canvasPoints.length === 0) return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const pdfPoints = canvasPoints.map((point) => viewportToPdf(viewport, point.x, point.y));
     const xs = pdfPoints.map((point) => point.x);
     const ys = pdfPoints.map((point) => point.y);
@@ -5116,7 +5771,7 @@ export class PdfEditor extends LitElement {
     if (!pdf || canvasPoints.length === 0) return;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const pdfPoints = canvasPoints.map((point) => viewportToPdf(viewport, point.x, point.y));
     const anchor = this.measureAnchor(kind, pdfPoints);
     const text = kind === 'area' ? this.formatArea(pdfPoints) : this.formatLength(pdfPoints);
@@ -5232,7 +5887,7 @@ export class PdfEditor extends LitElement {
     this.draftBox = null;
     void pdf.getPage(pageNumber).then(async (page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.insertKind !== 'link') return;
-      const viewport = page.getViewport({ scale: this.scale });
+      const viewport = this.viewportOf(page);
       const startPdf = viewportToPdf(viewport, start.x, start.y);
       const endPdf = viewportToPdf(viewport, end.x, end.y);
       const rect = pdfRectFromPoints(startPdf.x, startPdf.y, endPdf.x, endPdf.y);
@@ -5435,7 +6090,7 @@ export class PdfEditor extends LitElement {
     if (!pdf) return;
     void pdf.getPage(pageNumber).then((page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.insertKind !== 'stamp') return;
-      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), point.x, point.y);
+      const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
       this.stampMenu = { page: pageNumber, pdfX: pdfPoint.x, pdfY: pdfPoint.y, left: point.x, top: point.y };
     });
   }
@@ -5462,7 +6117,7 @@ export class PdfEditor extends LitElement {
     if (!pdf) return;
     void pdf.getPage(point.page).then((page) => {
       if (this.pdf !== pdf) return;
-      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), point.x, point.y);
+      const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
       const reader = new FileReader();
       reader.onload = () => {
         const src = typeof reader.result === 'string' ? reader.result : '';
@@ -5503,6 +6158,7 @@ export class PdfEditor extends LitElement {
       sortY: Math.max(...tops),
       points,
       src,
+      ...this.defaultInk(kind),
       quote: '',
       author: this.authorName,
       createdAt: Date.now(),
@@ -5522,7 +6178,7 @@ export class PdfEditor extends LitElement {
     const pageNumber = this.currentPage;
     const page = await pdf.getPage(pageNumber);
     if (this.pdf !== pdf || this.currentPage !== pageNumber) return;
-    const viewport = page.getViewport({ scale: this.scale });
+    const viewport = this.viewportOf(page);
     const noteNumbers = new Map<string, number>();
     let noteNumber = 0;
     for (const mark of this.marks) {
@@ -5549,6 +6205,9 @@ export class PdfEditor extends LitElement {
           text: mark.text,
           points,
           src: mark.src,
+          color: mark.color,
+          opacity: mark.opacity,
+          weight: mark.weight,
         });
         continue;
       }
@@ -5562,6 +6221,9 @@ export class PdfEditor extends LitElement {
           text: mark.kind === 'link' ? mark.text : '',
           points: [],
           src: mark.src,
+          color: mark.color,
+          opacity: mark.opacity,
+          weight: mark.weight,
         });
       }
     }
@@ -5895,12 +6557,11 @@ export class PdfEditor extends LitElement {
     if (mark.marked) return '#e37400';
     switch (mark.kind) {
       case 'highlight':
-        return '#f9ab00';
-      case 'note':
       case 'underline':
-        return '#e37400';
       case 'strike':
-        return '#d93025';
+        return mark.color;
+      case 'note':
+        return '#e37400';
       case 'signature':
       case 'distance':
       case 'perimeter':
@@ -6387,11 +7048,14 @@ export class PdfEditor extends LitElement {
         ></div>
       `;
     }
+    const inked = box.kind === 'highlight' || box.kind === 'underline' || box.kind === 'strike';
+    const tint = inked ? this.fadeColor(box.color, box.opacity) : '';
+    const thickness = inked ? Math.max(box.weight, box.weight * this.scale) : 0;
     return html`
       <div
         class="mark ${box.kind} ${box.selected ? 'selected' : ''}"
         data-mark=${box.id}
-        style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"
+        style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px${inked ? `;--mark-fill:${tint};--mark-ink:${tint};--mark-weight:${thickness}px` : ''}"
       ></div>
     `;
   }
@@ -6567,6 +7231,65 @@ export class PdfEditor extends LitElement {
     `;
   }
 
+  private viewChoice(label: string, checked: boolean, action: () => void, disabled = false) {
+    return html`
+      <button type="button" role="menuitemradio" aria-checked=${checked} ?disabled=${disabled} @click=${action}>
+        <span>${label}</span>
+        <span>${checked ? '✓' : ''}</span>
+      </button>
+    `;
+  }
+
+  private viewMenu() {
+    const locked = !this.pdf;
+    const actual = this.zoomMode === 'percent' && Math.abs(this.zoomPercent - 1) < 0.001;
+    return html`
+      <div class="popup view-menu" role="menu" aria-label="View">
+        <div class="view-heading" role="presentation">Sheets</div>
+        ${this.viewChoice('One page wide', this.viewSpread === 'single', () => this.setViewSpread('single'), locked)}
+        ${this.viewChoice('Two pages wide', this.viewSpread === 'pair', () => this.setViewSpread('pair'), locked)}
+        ${this.viewChoice('First page alone', this.viewSpread === 'cover', () => this.setViewSpread('cover'), locked)}
+        <div class="rule"></div>
+        <div class="view-heading" role="presentation">Motion</div>
+        ${this.viewChoice('Stay on the page', this.viewRead === 'page', () => this.setViewRead('page'), locked)}
+        ${this.viewChoice('Move through pages', this.viewRead === 'scroll', () => this.setViewRead('scroll'), locked)}
+        <div class="rule"></div>
+        <div class="view-heading" role="presentation">Angle</div>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => this.turnView(1)}>
+          <span>Quarter turn right</span>
+        </button>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => this.turnView(-1)}>
+          <span>Quarter turn left</span>
+        </button>
+        <button type="button" role="menuitem" ?disabled=${locked || this.viewTurn === 0} @click=${() => this.turnView(0)}>
+          <span>Original angle</span>
+        </button>
+        <div class="rule"></div>
+        <div class="view-heading" role="presentation">Display</div>
+        <button type="button" role="menuitemradio" aria-checked=${this.zoomMode === 'fit-page'} ?disabled=${locked} @click=${() => this.chooseFit('fit-page')}>
+          <span>Fit the page</span>
+          <span>${this.zoomMode === 'fit-page' ? '✓' : ''}</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked=${this.zoomMode === 'fit-width'} ?disabled=${locked} @click=${() => this.chooseFit('fit-width')}>
+          <span>Fit the width</span>
+          <span>${this.zoomMode === 'fit-width' ? '✓' : ''}</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked=${actual} ?disabled=${locked} @click=${() => this.actualSize()}>
+          <span>Actual size</span>
+          <span>${actual ? '✓' : ''}</span>
+        </button>
+        <button type="button" role="menuitemcheckbox" aria-checked=${this.pagesPressed} ?disabled=${locked} @click=${() => this.togglePageList()}>
+          <span>Thumbnails</span>
+          <span>${this.pagesPressed ? '✓' : ''}</span>
+        </button>
+        <button type="button" role="menuitemcheckbox" aria-checked=${this.wordFullScreen} @click=${() => this.toggleWordFullScreen()}>
+          <span>${this.wordFullScreen ? 'Leave full screen' : 'Full screen'}</span>
+          <span>${this.wordFullScreen ? '✓' : ''}</span>
+        </button>
+      </div>
+    `;
+  }
+
   private zoomChecked(step: number): boolean {
     return this.zoomMode === 'percent' && Math.abs(this.zoomPercent - step) < 0.001;
   }
@@ -6594,6 +7317,7 @@ export class PdfEditor extends LitElement {
                   this.menuOpen = !this.menuOpen;
                   this.zoomOpen = false;
                   this.searchOpen = false;
+                  this.viewMenuOpen = false;
                 }}
               >
                 ${iconMenu}
@@ -6638,6 +7362,25 @@ export class PdfEditor extends LitElement {
             >
               ${iconPages}
             </button>
+            <div class="anchor view-root">
+              <button
+                class="icon"
+                type="button"
+                aria-label="View"
+                aria-haspopup="menu"
+                aria-pressed=${this.viewMenuOpen}
+                aria-expanded=${this.viewMenuOpen}
+                @click=${() => {
+                  this.viewMenuOpen = !this.viewMenuOpen;
+                  this.menuOpen = false;
+                  this.zoomOpen = false;
+                  this.searchOpen = false;
+                }}
+              >
+                ${iconEye}
+              </button>
+              ${this.viewMenuOpen ? this.viewMenu() : null}
+            </div>
             <button class="icon" type="button" aria-label="Save" ?disabled=${!this.pdf || this.saving} @click=${() => void this.save()}>${iconSave}</button>
             <span class="sep"></span>
             <div class="anchor zoom-root">
@@ -6651,6 +7394,7 @@ export class PdfEditor extends LitElement {
                   this.zoomOpen = !this.zoomOpen;
                   this.menuOpen = false;
                   this.searchOpen = false;
+                  this.viewMenuOpen = false;
                 }}
               >
                 <span>${this.zoomLabel}</span>
@@ -6788,6 +7532,7 @@ export class PdfEditor extends LitElement {
                   this.searchOpen = !this.searchOpen;
                   this.menuOpen = false;
                   this.zoomOpen = false;
+                  this.viewMenuOpen = false;
                   if (this.searchOpen) {
                     void this.updateComplete.then(() => {
                       this.searchRoot?.querySelector('input')?.focus();
@@ -6956,6 +7701,7 @@ export class PdfEditor extends LitElement {
             `
           : null}
         <div class="workspace">
+          ${this.stylePanel()}
           ${this.pagesPanel}
           <div
             class="viewer ${this.tool === 'hand' ? 'hand' : ''} ${this.panning ? 'panning' : ''} ${this.canDraw ? 'markup' : ''} ${this.markupKind === 'note' ? 'note-tool' : ''} ${!this.canDraw && this.tool === 'select' && !this.editText ? 'select-text' : ''}"
@@ -6964,10 +7710,25 @@ export class PdfEditor extends LitElement {
             @pointermove=${this.onPointerMove}
             @pointerup=${this.onPointerUp}
             @pointercancel=${this.onPointerCancel}
+            @scroll=${this.onViewerScroll}
           >
-            <div class="stage">
-              <div class="page-frame ${this.pageReady ? '' : 'is-hidden'}">
-                <canvas class="page-canvas"></canvas>
+            <div class="stage ${this.viewRead === 'scroll' ? 'is-flow' : ''}">
+              ${repeat(
+                this.visibleRows(),
+                (row) => row.join('-'),
+                (row) => html`
+                  <div class="sheet-row">
+                    ${repeat(
+                      row,
+                      (page) => page,
+                      (page) => html`
+                        <div class="page-frame ${this.pageReady ? '' : 'is-hidden'}" data-sheet=${page}>
+                          <canvas
+                            class=${page === this.currentPage ? 'page-canvas' : 'sheet-canvas'}
+                            data-sheet-canvas=${page}
+                          ></canvas>
+                          ${page === this.currentPage
+                            ? html`
                 <div class="marks">
                   ${this.inkSvg()}
                   ${this.markBoxes.map((box) => this.markFace(box))}
@@ -7110,7 +7871,27 @@ export class PdfEditor extends LitElement {
                       </div>
                     `
                   : null}
-              </div>
+                            `
+                            : html`
+                                <button
+                                  class="sheet-hit"
+                                  type="button"
+                                  aria-label=${`Show page ${page}`}
+                                  @click=${(event: Event) => {
+                                    if (this.tool === 'hand') {
+                                      event.preventDefault();
+                                      return;
+                                    }
+                                    this.goToPage(page);
+                                  }}
+                                ></button>
+                              `}
+                        </div>
+                      `,
+                    )}
+                  </div>
+                `,
+              )}
             </div>
             ${this.pageReady
               ? null

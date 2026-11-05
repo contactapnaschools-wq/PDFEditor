@@ -13,6 +13,13 @@ export const iconPages = svg`
   </svg>
 `;
 
+export const iconEye = svg`
+  <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M2.5 12S6.4 6.6 12 6.6 21.5 12 21.5 12 17.6 17.4 12 17.4 2.5 12 2.5 12z"></path>
+    <circle cx="12" cy="12" r="2.5"></circle>
+  </svg>
+`;
+
 export const iconSave = svg`
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
     <path d="M6 4.5h8.8L19.5 9.2V19.5H6z"></path>

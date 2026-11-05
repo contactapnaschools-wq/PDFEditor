@@ -43,14 +43,19 @@ export async function openDocument(source: Uint8Array | string): Promise<PDFDocu
   return task.promise;
 }
 
+function turnedRotation(pageRotate: number, quarterTurns: number): number {
+  return (((pageRotate || 0) + quarterTurns * 90) % 360 + 360) % 360;
+}
+
 export async function paintPage(
   pdf: PDFDocumentProxy,
   pageNumber: number,
   canvas: HTMLCanvasElement,
   cssScale: number,
+  quarterTurns = 0,
 ): Promise<RenderTask> {
   const page = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale: cssScale });
+  const viewport = page.getViewport({ scale: cssScale, rotation: turnedRotation(page.rotate, quarterTurns) });
   const pixelRatio = window.devicePixelRatio || 1;
   canvas.width = Math.max(1, Math.floor(viewport.width * pixelRatio));
   canvas.height = Math.max(1, Math.floor(viewport.height * pixelRatio));
@@ -66,9 +71,10 @@ export async function paintPage(
 export async function pageSizeAtScale1(
   pdf: PDFDocumentProxy,
   pageNumber: number,
+  quarterTurns = 0,
 ): Promise<{ width: number; height: number }> {
   const page = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: 1, rotation: turnedRotation(page.rotate, quarterTurns) });
   return { width: viewport.width, height: viewport.height };
 }
 
@@ -430,6 +436,16 @@ export interface DrawnMark {
   points: Array<{ x: number; y: number }>;
   image?: Uint8Array;
   imageType?: 'png' | 'jpg';
+  color?: string;
+  opacity?: number;
+  weight?: number;
+}
+
+function paintOf(hex: string | undefined, fallback: RGB): RGB {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex ?? '');
+  if (!match) return fallback;
+  const value = Number.parseInt(match[1], 16);
+  return rgb(((value >> 16) & 255) / 255, ((value >> 8) & 255) / 255, (value & 255) / 255);
 }
 
 const ink = rgb(0.125, 0.129, 0.141);
@@ -456,17 +472,25 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
   const rect = mark.rects[0];
   const stroke = 1.5;
   if (mark.kind === 'highlight') {
-    for (const box of mark.rects) page.drawRectangle({ x: box.x, y: box.y, width: box.width, height: box.height, color: yellow, opacity: 0.45 });
+    const color = paintOf(mark.color, yellow);
+    const opacity = mark.opacity ?? 0.45;
+    for (const box of mark.rects) page.drawRectangle({ x: box.x, y: box.y, width: box.width, height: box.height, color, opacity });
     return;
   }
   if (mark.kind === 'underline') {
-    for (const box of mark.rects) page.drawLine({ start: { x: box.x, y: box.y }, end: { x: box.x + box.width, y: box.y }, thickness: 2, color: orange });
+    const color = paintOf(mark.color, orange);
+    const thickness = mark.weight ?? 2;
+    const opacity = mark.opacity ?? 1;
+    for (const box of mark.rects) page.drawLine({ start: { x: box.x, y: box.y }, end: { x: box.x + box.width, y: box.y }, thickness, color, opacity });
     return;
   }
   if (mark.kind === 'strike') {
+    const color = paintOf(mark.color, red);
+    const thickness = mark.weight ?? 2;
+    const opacity = mark.opacity ?? 1;
     for (const box of mark.rects) {
       const y = box.y + box.height / 2;
-      page.drawLine({ start: { x: box.x, y }, end: { x: box.x + box.width, y }, thickness: 2, color: red });
+      page.drawLine({ start: { x: box.x, y }, end: { x: box.x + box.width, y }, thickness, color, opacity });
     }
     return;
   }
