@@ -75,6 +75,16 @@ export const iconOpen = svg`
   </svg>
 `;
 
+export const iconMultiSelect = svg`
+  <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+    <rect x="4" y="4.5" width="6.5" height="6.5" rx="1.2"></rect>
+    <path d="M5.6 7.7 7 9.1 9.1 6.6"></path>
+    <rect x="13.5" y="4.5" width="6.5" height="6.5" rx="1.2"></rect>
+    <rect x="4" y="14" width="6.5" height="6.5" rx="1.2"></rect>
+    <rect x="13.5" y="14" width="6.5" height="6.5" rx="1.2"></rect>
+  </svg>
+`;
+
 export const iconFilter = svg`
   <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
     <path d="M4.5 6h15l-5.5 7v5l-4 1.5V13z"></path>

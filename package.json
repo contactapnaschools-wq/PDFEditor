@@ -27,6 +27,7 @@
     "node": ">=18"
   },
   "dependencies": {
+    "docx-preview": "^0.4.1",
     "lit": "^3.3.3",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.4.299"

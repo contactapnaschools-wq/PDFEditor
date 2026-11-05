@@ -470,9 +470,10 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
     }
     return;
   }
-  if (mark.kind === 'note' && rect) {
-    page.drawRectangle({ x: rect.x, y: rect.y - 22, width: 22, height: 22, color: pin });
-    drawTopLeftText(page, font, mark.text, rect.x + 26, rect.y, 12, ink);
+  if (mark.kind === 'note') {
+    for (const box of mark.rects) {
+      page.drawRectangle({ x: box.x, y: box.y, width: box.width, height: box.height, color: pin, opacity: 0.35 });
+    }
     return;
   }
   if (mark.kind === 'pen' || mark.kind === 'signature' || mark.kind === 'line' || mark.kind === 'distance' || mark.kind === 'perimeter') {

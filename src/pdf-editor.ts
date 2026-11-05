@@ -9,6 +9,7 @@ import {
   iconHand,
   iconMenu,
   iconMinus,
+  iconMultiSelect,
   iconOpen,
   iconPages,
   iconPlus,
@@ -41,6 +42,7 @@ import {
   type TextRun,
   type ViewportBox,
 } from './pdf-engine';
+import { isZipDocument, renderDocxPages } from './word-preview';
 
 export interface PdfLoadDetail {
   pages: number;
@@ -62,10 +64,34 @@ type MeasureKind = 'distance' | 'perimeter' | 'area';
 type SignKind = 'signature' | 'initials' | 'date';
 type FormKind = 'text-field' | 'checkbox';
 type ArrowEnd = 'none' | 'start' | 'end';
+type CommentStatus = 'none' | 'accepted' | 'rejected' | 'cancelled' | 'completed';
+type CommentSort = 'position' | 'created' | 'modified' | 'status' | 'author' | 'type' | 'color';
+type CommentAction = CommentStatus | 'marked' | 'unmarked';
+type FilterTab = 'user' | 'color' | 'type' | 'status';
+
+interface CommentFilterState {
+  users: string[];
+  colors: string[];
+  types: string[];
+  statuses: string[];
+  includeReplies: boolean;
+  filterDocument: boolean;
+}
+
+function emptyCommentFilter(): CommentFilterState {
+  return { users: [], colors: [], types: [], statuses: [], includeReplies: true, filterDocument: false };
+}
 
 interface PdfPoint {
   x: number;
   y: number;
+}
+
+interface NoteReply {
+  id: string;
+  author: string;
+  createdAt: number;
+  text: string;
 }
 
 interface Mark {
@@ -77,6 +103,13 @@ interface Mark {
   sortY: number;
   points: PdfPoint[];
   src: string;
+  quote: string;
+  author: string;
+  createdAt: number;
+  modifiedAt: number;
+  status: CommentStatus;
+  marked: boolean;
+  replies: NoteReply[];
 }
 
 interface MarkBox extends ViewportBox {
@@ -139,6 +172,26 @@ interface NoteDraft {
   text: string;
   tip: PdfPoint | null;
   rect: PdfRect | null;
+  quote: string;
+  rects: PdfRect[];
+  author: string;
+  createdAt: number;
+}
+
+interface CommentAnchor {
+  left: number;
+  top: number;
+  fromX: number;
+  fromY: number;
+}
+
+const COMMENT_POPUP_WIDTH = 272;
+
+interface QuickSelection {
+  page: number;
+  rects: PdfRect[];
+  quote: string;
+  boxes: ViewportBox[];
 }
 
 const MARK_TOOLS: ReadonlyArray<{ id: MarkKind; label: string }> = [
@@ -157,6 +210,14 @@ const SHAPE_TOOLS: ReadonlyArray<{ id: ShapeKind; label: string }> = [
   { id: 'rect', label: 'Rectangle' },
   { id: 'ellipse', label: 'Ellipse' },
   { id: 'polygon', label: 'Polygon' },
+];
+
+const COMMENT_STATUSES: ReadonlyArray<{ id: CommentStatus; label: string; color: string }> = [
+  { id: 'accepted', label: 'Accepted', color: '#1e8e3e' },
+  { id: 'rejected', label: 'Rejected', color: '#d93025' },
+  { id: 'cancelled', label: 'Cancelled', color: '#80868b' },
+  { id: 'completed', label: 'Completed', color: '#1a73e8' },
+  { id: 'none', label: 'None', color: '#dadce0' },
 ];
 
 const INSERT_TOOLS: ReadonlyArray<{ id: InsertKind; label: string }> = [
@@ -199,6 +260,111 @@ const MODES: ReadonlyArray<{ id: EditorMode; label: string }> = [
 
 const ZOOM_STEPS = [0.25, 0.5, 0.65, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4];
 
+const OPEN_ACCEPT =
+  'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.png,.jpg,.jpeg,image/png,image/jpeg';
+const WORD_ZOOM_LEVELS = [2, 1.5, 1, 0.75, 0.5] as const;
+
+type WordFit = 'percent' | 'page' | 'width';
+type WordZoomChoice = 'page' | 'width' | number;
+
+function wordFormat(source: PdfSource): 'docx' | 'doc' | null {
+  if (source instanceof File) {
+    const name = source.name.toLowerCase();
+    if (name.endsWith('.docx')) return 'docx';
+    if (name.endsWith('.doc')) return 'doc';
+    if (source.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') return 'docx';
+    if (source.type === 'application/msword') return 'doc';
+    return null;
+  }
+  if (typeof source === 'string') {
+    const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
+    if (path.endsWith('.docx')) return 'docx';
+    if (path.endsWith('.doc')) return 'doc';
+  }
+  return null;
+}
+
+type ImageFormat = 'png' | 'jpeg';
+
+function imageFormat(source: PdfSource): ImageFormat | null {
+  if (source instanceof File) {
+    const name = source.name.toLowerCase();
+    if (name.endsWith('.png')) return 'png';
+    if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'jpeg';
+    if (source.type === 'image/png') return 'png';
+    if (source.type === 'image/jpeg' || source.type === 'image/jpg') return 'jpeg';
+    return null;
+  }
+  if (typeof source === 'string') {
+    const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
+    if (path.endsWith('.png')) return 'png';
+    if (path.endsWith('.jpg') || path.endsWith('.jpeg')) return 'jpeg';
+  }
+  return null;
+}
+
+function looksLikeImage(bytes: Uint8Array, format: ImageFormat): boolean {
+  if (format === 'png') {
+    return bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+  }
+  return bytes.length > 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+}
+
+function iconEnterFullScreen(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 4H5v4M15 4h4v4M9 20H5v-4M15 20h4v-4"></path>
+    </svg>
+  `;
+}
+
+function iconExitFullScreen(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 9h4V5M20 9h-4V5M4 15h4v4M20 15h-4v4"></path>
+    </svg>
+  `;
+}
+
+function iconPreviewDownload(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 5v10"></path>
+      <path d="m8 11 4 4 4-4"></path>
+      <path d="M6 19h12"></path>
+    </svg>
+  `;
+}
+
+function iconPreviewPrint(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+      <path d="M7 9V5h10v4"></path>
+      <rect x="6" y="9" width="12" height="7" rx="1.4"></rect>
+      <path d="M8 16h8v3H8z"></path>
+    </svg>
+  `;
+}
+
+function iconPreviewSettings(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"></circle>
+      <path d="M12 4.5v2.2M12 17.3V19.5M4.5 12h2.2M17.3 12H19.5M6.6 6.6l1.6 1.6M15.8 15.8l1.6 1.6M17.4 6.6l-1.6 1.6M8.2 15.8l-1.6 1.6"></path>
+    </svg>
+  `;
+}
+
+interface PreviewSavePicker {
+  showSaveFilePicker?: (options: {
+    suggestedName?: string;
+    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  }) => Promise<{
+    name: string;
+    createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+  }>;
+}
+
 @customElement('pdf-editor')
 export class PdfEditor extends LitElement {
   static override styles = css`
@@ -228,6 +394,7 @@ export class PdfEditor extends LitElement {
       display: flex;
       align-items: stretch;
       gap: 4px;
+      position: relative;
       padding: 0 8px 0 4px;
       border-bottom: 1px solid #e0e3e7;
       background: #fff;
@@ -584,6 +751,161 @@ export class PdfEditor extends LitElement {
       font-size: 13px;
       cursor: pointer;
     }
+    .note-actions button:disabled { opacity: 0.45; cursor: default; }
+
+    .mark.note {
+      background: rgba(249, 171, 0, 0.38);
+      box-shadow: inset 0 -2px 0 #e37400;
+    }
+    .mark.note.pending { pointer-events: none; }
+
+    .comment-link {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      overflow: visible;
+      pointer-events: none;
+      z-index: 2;
+    }
+    .comment-pop {
+      position: absolute;
+      z-index: 4;
+      margin: 0;
+      cursor: default;
+      width: 272px;
+      max-width: calc(100% - 16px);
+      max-height: 360px;
+      overflow: auto;
+      padding: 12px;
+      border: 1px solid #e0e3e7;
+      border-top: 3px solid #e37400;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 10px 28px rgba(60, 64, 67, 0.2);
+      line-height: normal;
+    }
+    .comment-person {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .avatar {
+      width: 28px;
+      height: 28px;
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 50%;
+      background: #fde7c7;
+      color: #8a4b08;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    .avatar.small { width: 22px; height: 22px; font-size: 11px; }
+    .person-name {
+      display: block;
+      color: #202124;
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .person-time {
+      display: block;
+      margin-top: 1px;
+      color: #80868b;
+      font-size: 11px;
+    }
+    .comment-quote {
+      display: block;
+      margin: 10px 0 0;
+      padding: 6px 8px;
+      border-left: 3px solid #f0c36d;
+      border-radius: 0 6px 6px 0;
+      background: #fff8eb;
+      color: #5f6368;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow-wrap: anywhere;
+    }
+    .comment-pop textarea {
+      width: 100%;
+      min-height: 72px;
+      margin-top: 10px;
+      resize: vertical;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      padding: 8px;
+      font-size: 13px;
+      line-height: 1.4;
+      color: #202124;
+    }
+    .comment-pop textarea:focus {
+      outline: none;
+      border-color: #e37400;
+      box-shadow: 0 0 0 2px rgba(227, 116, 0, 0.2);
+    }
+    .comment-body {
+      display: block;
+      margin: 10px 0 0;
+      color: #202124;
+      font-size: 13px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    .reply-list {
+      list-style: none;
+      margin: 10px 0 0;
+      padding: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .reply-list li {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .reply-list p {
+      margin: 4px 0 0;
+      color: #202124;
+      font-size: 13px;
+      line-height: 1.35;
+      white-space: pre-wrap;
+    }
+    .reply-form {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
+    .reply-form input {
+      flex: 1;
+      min-width: 0;
+      height: 32px;
+      padding: 0 10px;
+      border: 1px solid #dadce0;
+      border-radius: 16px;
+      font-size: 13px;
+      color: #202124;
+    }
+    .reply-form input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px #d2e3fc;
+    }
+    .reply-form button {
+      flex: none;
+      height: 32px;
+      padding: 0 12px;
+      border: none;
+      border-radius: 16px;
+      background: #1a73e8;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .reply-form button:disabled { opacity: 0.45; cursor: default; }
     .annotate-bar button:hover { background: #e8eaed; }
     .annotate-bar button[aria-pressed='true'] {
       color: #1a73e8;
@@ -600,6 +922,80 @@ export class PdfEditor extends LitElement {
       border-bottom: 1px solid #eee;
     }
     .comment-row.selected { background: #e8f0fe; }
+    .viewer.markup.note-tool { cursor: text; }
+    .viewer.select-text { cursor: text; }
+
+    .freetext-editor {
+      position: absolute;
+      z-index: 4;
+      box-sizing: border-box;
+      margin: 0;
+      padding: 4px 6px;
+      border: 1.5px dotted #5f6368;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.92);
+      color: #202124;
+      font-family: Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.35;
+      resize: both;
+      outline: none;
+    }
+    .freetext-editor::placeholder { color: #9aa0a6; }
+    .mark.freetext.selected {
+      border: 1.5px dotted #5f6368;
+      background: rgba(255, 255, 255, 0.92);
+    }
+    .text-select {
+      position: absolute;
+      background: rgba(26, 115, 232, 0.2);
+      border-radius: 2px;
+      pointer-events: none;
+    }
+    .select-handle {
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #1a73e8;
+      pointer-events: none;
+    }
+    .quick-bar, .quick-styles {
+      position: absolute;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 4px;
+      border: 1px solid #e0e3e7;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 8px 24px rgba(60, 64, 67, 0.16);
+      transform: translateX(-50%);
+    }
+    .quick-bar button, .quick-styles button {
+      height: 32px;
+      border: none;
+      border-radius: 7px;
+      background: transparent;
+      color: #3c4043;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+    }
+    .quick-bar button { width: 32px; padding: 0; }
+    .quick-styles button { padding: 0 8px; font-size: 12px; }
+    .quick-bar button:hover, .quick-styles button:hover { background: #f1f3f4; }
+    .quick-bar button[aria-pressed='true'] { background: #e8f0fe; color: #1a73e8; }
+    .quick-bar button:disabled { opacity: 0.35; cursor: default; }
+    .quick-bar svg, .quick-styles svg { width: 16px; height: 16px; display: block; }
+    .style-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
     .comment {
       flex: 1;
       min-width: 0;
@@ -616,16 +1012,286 @@ export class PdfEditor extends LitElement {
     }
     .comment-kind { font-size: 12px; font-weight: 600; color: #1a73e8; }
     .comment-page { font-size: 11px; color: #80868b; }
-    .comment-text { font-size: 13px; line-height: 1.35; }
-    .comment-delete {
-      margin: 8px 8px 0 0;
+    .comment-text { font-size: 13px; line-height: 1.35; white-space: pre-wrap; }
+    .reply-count {
+      margin-top: 6px;
+      color: #80868b;
+      font-size: 11px;
+    }
+    .comment-card {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 8px 12px;
+      border-bottom: 1px solid #eee;
+      border-left: 3px solid transparent;
+    }
+    .comment-card.selected { background: #f4f8fe; outline: 1px solid #8ab4f8; outline-offset: -1px; }
+    .comment-card.is-marked:not(.tone-accepted):not(.tone-rejected):not(.tone-cancelled):not(.tone-completed) {
+      border-left-color: #e37400;
+      background: #fff8eb;
+    }
+    .comment-card.tone-accepted { border-left-color: #1e8e3e; background: #f2faf4; }
+    .comment-card.tone-rejected { border-left-color: #d93025; background: #fdf3f2; }
+    .comment-card.tone-cancelled { border-left-color: #80868b; background: #f5f6f7; }
+    .comment-card.tone-completed { border-left-color: #1a73e8; background: #f2f6fe; }
+    .comment-card.is-marked { box-shadow: inset 0 0 0 1px #f0c36d; }
+    .comment-card .comment { padding: 0; }
+    .comment-main { flex: 1; min-width: 0; }
+    .comment-top { display: flex; align-items: flex-start; gap: 4px; }
+    .comment-tools { display: flex; flex: none; gap: 2px; }
+    .comment-menu-btn {
+      width: 28px;
       height: 28px;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: #5f6368;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .comment-menu-btn:hover,
+    .comment-menu-btn[aria-expanded='true'] {
+      background: #fff;
+      border-color: #dadce0;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #dadce0;
+      box-shadow: inset 0 0 0 1px rgba(32, 33, 36, 0.12);
+    }
+    .comment-menu {
+      position: fixed;
+      z-index: 40;
+      min-width: 176px;
+      margin: 0;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid #e0e3e7;
+      border-radius: 10px;
+      box-shadow: 0 10px 28px rgba(60, 64, 67, 0.18);
+    }
+    .comment-menu button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
       padding: 0 8px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #202124;
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .comment-menu button:hover { background: #f1f3f4; }
+    .comment-menu button[aria-checked='true'] { background: #eef3fd; }
+    .comment-menu button.danger { color: #b3261e; }
+    .comment-menu .swatch {
+      width: 10px;
+      height: 10px;
+      flex: none;
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 1px rgba(32, 33, 36, 0.12);
+    }
+    .comment-menu .swatch.marked { background: #e37400; }
+    .menu-rule { height: 1px; margin: 4px 2px; background: #eee; border: none; }
+    .chip-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      height: 18px;
+      padding: 0 7px;
+      border-radius: 9px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .status-chip.tone-accepted { background: #e6f4ea; color: #137333; }
+    .status-chip.tone-rejected { background: #fce8e6; color: #b3261e; }
+    .status-chip.tone-cancelled { background: #f1f3f4; color: #5f6368; }
+    .status-chip.tone-completed { background: #e8f0fe; color: #1967d2; }
+    .status-chip.tone-marked { background: #fef3e2; color: #b06000; }
+    .comment-pop.tone-accepted { border-top-color: #1e8e3e; }
+    .comment-pop.tone-rejected { border-top-color: #d93025; }
+    .comment-pop.tone-cancelled { border-top-color: #80868b; }
+    .comment-pop.tone-completed { border-top-color: #1a73e8; }
+    .comment-pop.is-marked { box-shadow: 0 10px 28px rgba(60, 64, 67, 0.2), inset 0 0 0 1px #f0c36d; }
+    .comment-check { display: flex; padding-top: 2px; }
+    .comment-check input { width: 15px; height: 15px; margin: 0; accent-color: #1a73e8; cursor: pointer; }
+    .comment-edit { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+    .comment-edit textarea {
+      width: 100%;
+      min-height: 64px;
+      resize: vertical;
       border: 1px solid #dadce0;
-      border-radius: 4px;
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 13px;
+      color: #202124;
+    }
+    .comment-edit textarea:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px #d2e3fc;
+    }
+    .select-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 6px 8px;
+      border-radius: 8px;
+      background: #f8f9fa;
+      color: #3c4043;
+      font-size: 12px;
+    }
+    .select-bar label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .select-bar input { width: 15px; height: 15px; margin: 0; accent-color: #1a73e8; }
+    .select-bar button {
+      margin-left: auto;
+      height: 26px;
+      padding: 0 10px;
+      border: 1px solid #f3c1be;
+      border-radius: 6px;
       background: #fff;
       color: #b3261e;
       font-size: 12px;
+      cursor: pointer;
+    }
+    .select-bar button:disabled { opacity: 0.4; cursor: default; }
+    .sort-actions .icon[aria-pressed='true'] {
+      color: #1a73e8;
+      background: #e8f0fe;
+    }
+
+    .filter-backdrop {
+      position: absolute;
+      inset: 0;
+      z-index: 25;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(32, 33, 36, 0.32);
+    }
+    .filter-dialog {
+      width: 380px;
+      max-width: 100%;
+      max-height: 100%;
+      display: flex;
+      flex-direction: column;
+      border-radius: 12px;
+      background: #fff;
+      box-shadow: 0 16px 48px rgba(60, 64, 67, 0.28);
+      overflow: hidden;
+    }
+    .filter-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 14px 10px 16px;
+    }
+    .filter-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+    .filter-close {
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #5f6368;
+      font-size: 20px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .filter-close:hover { background: #f1f3f4; }
+    .filter-tabs {
+      display: flex;
+      gap: 2px;
+      margin: 0 16px;
+      padding: 3px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+    }
+    .filter-tabs button {
+      flex: 1;
+      height: 30px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #3c4043;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .filter-tabs button[aria-selected='true'] {
+      background: #1a73e8;
+      color: #fff;
+    }
+    .filter-options {
+      min-height: 148px;
+      max-height: 220px;
+      overflow: auto;
+      margin: 8px 0 0;
+      padding: 8px 16px 12px;
+    }
+    .filter-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 32px;
+      color: #202124;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .filter-option input { width: 15px; height: 15px; margin: 0; accent-color: #1a73e8; }
+    .filter-swatch {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      box-shadow: inset 0 0 0 1px rgba(32, 33, 36, 0.16);
+    }
+    .filter-empty { margin: 28px 0; color: #80868b; font-size: 13px; text-align: center; }
+    .filter-settings {
+      padding: 12px 16px;
+      border-top: 1px solid #eee;
+    }
+    .filter-settings h3 {
+      margin: 0 0 8px;
+      color: #5f6368;
+      font-size: 12px;
+      font-weight: 600;
+      text-align: center;
+    }
+    .filter-foot {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 16px 16px;
+      border-top: 1px solid #eee;
+    }
+    .filter-foot .text-btn {
+      border: none;
+      background: transparent;
+      color: #1a73e8;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    .filter-foot .text-btn:hover { text-decoration: underline; }
+    .filter-foot .apply-btn {
+      height: 32px;
+      padding: 0 16px;
+      border: none;
+      border-radius: 6px;
+      background: #1a73e8;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
     }
 
@@ -748,6 +1414,9 @@ export class PdfEditor extends LitElement {
       font-size: 13px;
     }
     .sort-row select {
+      flex: 1;
+      min-width: 0;
+      max-width: 156px;
       height: 28px;
       border: 1px solid #dadce0;
       border-radius: 4px;
@@ -871,11 +1540,279 @@ export class PdfEditor extends LitElement {
     @media (max-width: 840px) {
       .comments { width: 260px; }
     }
+
+    .word-stage {
+      position: relative;
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      background: #e7e9ee;
+      display: flex;
+      justify-content: safe center;
+      align-items: flex-start;
+      padding: 28px 20px 36px;
+    }
+
+    .word-stage:focus { outline: none; }
+
+    .word-stage > .status {
+      background: #e7e9ee;
+      pointer-events: auto;
+    }
+
+    .word-frame {
+      position: relative;
+      flex: none;
+      margin: 0 auto;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(32, 33, 36, 0.16), 0 10px 28px rgba(32, 33, 36, 0.14);
+      overflow: hidden;
+    }
+
+    .word-pages {
+      position: absolute;
+      top: 0;
+      left: 0;
+      transform-origin: top left;
+    }
+
+    .word-pages .docx-wrapper {
+      background: transparent !important;
+      padding: 0 !important;
+      display: block !important;
+      width: max-content !important;
+      min-height: 0 !important;
+    }
+
+    .word-pages section.docx {
+      margin: 0 !important;
+      box-shadow: none !important;
+    }
+
+    .word-pages section.docx[hidden] { display: none !important; }
+
+    .word-pages img.preview-image {
+      display: block;
+      width: auto;
+      height: auto;
+      max-width: none;
+      background: #fff;
+    }
+
+    .word-bar {
+      flex: none;
+      height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 12px 0 16px;
+      border-top: 1px solid #e0e3e7;
+      background: #fff;
+      z-index: 2;
+    }
+
+    .word-page {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      color: #3c4043;
+    }
+
+    .word-page svg { width: 16px; height: 16px; flex: none; }
+
+    .word-page-label {
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .word-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+
+    .word-zoom {
+      height: 32px;
+      min-width: 76px;
+      padding: 0 6px 0 10px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #202124;
+      font-size: 13px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 2px;
+      cursor: pointer;
+    }
+
+    .word-zoom svg { width: 16px; height: 16px; }
+    .word-zoom:hover:not(:disabled) { background: #f1f3f4; }
+    .word-zoom:disabled { opacity: 0.38; cursor: default; }
+
+    .word-menu-root { position: relative; display: flex; align-items: center; }
+
+    .word-pop {
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      min-width: 220px;
+      padding: 6px;
+      background: #fff;
+      border: 1px solid #e0e3e7;
+      border-radius: 10px;
+      box-shadow: 0 8px 24px rgba(32, 33, 36, 0.16);
+      z-index: 6;
+    }
+
+    .word-pop button {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #202124;
+      font-size: 13px;
+      cursor: pointer;
+    }
+
+    .word-pop button svg { width: 16px; height: 16px; flex: none; }
+    .word-pop button:hover:not(:disabled) { background: #f1f3f4; }
+    .word-pop button:disabled { opacity: 0.4; cursor: default; }
+    .word-pop .rule { margin: 4px 6px; }
+
+    .settings-label {
+      margin: 2px 2px 4px;
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #5f6368;
+    }
+
+    .preview-dark { background: #202124; }
+    .preview-dark .word-stage { background: #202124; }
+    .preview-dark .word-stage > .status { background: #202124; color: #e8eaed; }
+    .preview-dark .word-bar { background: #292a2d; border-top-color: #3c4043; }
+    .preview-dark .word-page,
+    .preview-dark .word-zoom,
+    .preview-dark .icon { color: #e8eaed; }
+    .preview-dark .word-zoom:hover:not(:disabled),
+    .preview-dark .icon:hover:not(:disabled) { background: #3c4043; }
+    .preview-dark .word-pop { background: #292a2d; border-color: #3c4043; }
+    .preview-dark .word-pop button { color: #e8eaed; }
+    .preview-dark .word-pop button:hover:not(:disabled) { background: #3c4043; }
+    .preview-dark .word-pop .rule { background: #3c4043; }
+    .preview-dark .toolbar,
+    .preview-dark .annotate-bar,
+    .preview-dark .popup,
+    .preview-dark .search-pop {
+      background: #292a2d;
+      border-color: #3c4043;
+      color: #e8eaed;
+    }
+    .preview-dark .viewer,
+    .preview-dark .pages { background: #202124; }
+    .preview-dark .pages { border-right-color: #3c4043; }
+    .preview-dark .toolbar { border-bottom-color: #3c4043; }
+    .preview-dark .sep,
+    .preview-dark .popup .rule,
+    .preview-dark .annotate-bar { background-color: #3c4043; }
+    .preview-dark .annotate-bar { background: #292a2d; }
+    .preview-dark .tab,
+    .preview-dark .popup button,
+    .preview-dark .zoom-button,
+    .preview-dark .menu-label { color: #e8eaed; }
+    .preview-dark .popup button:hover:not(:disabled),
+    .preview-dark .tab:hover { background: #3c4043; }
+    .preview-dark .icon[aria-pressed='true'] { color: #8ab4f8; background: #3c4043; }
+    .popup.file-menu { min-width: 220px; }
+    .menu-item { display: inline-flex; align-items: center; gap: 10px; }
+    .popup button svg,
+    .menu-item svg { width: 16px; height: 16px; flex: none; }
+
+    .word-modal {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: rgba(32, 33, 36, 0.32);
+    }
+
+    .word-dialog {
+      width: min(300px, 100%);
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 12px 40px rgba(32, 33, 36, 0.28);
+      padding: 18px 18px 14px;
+    }
+
+    .word-dialog h2 {
+      margin: 0 0 8px;
+      font-size: 18px;
+      font-weight: 650;
+      color: #1a73e8;
+    }
+
+    .zoom-option {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 2px;
+      font-size: 14px;
+      color: #202124;
+      cursor: pointer;
+    }
+
+    .zoom-option input { accent-color: #1a73e8; margin: 0; }
+
+    .word-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .word-dialog-actions button {
+      min-width: 78px;
+      height: 34px;
+      border-radius: 6px;
+      border: 1px solid #dadce0;
+      background: #fff;
+      color: #202124;
+      font-size: 14px;
+      cursor: pointer;
+    }
+
+    .word-dialog-actions button:hover { background: #f8f9fa; }
+
+    .word-dialog-actions .primary {
+      background: #1a73e8;
+      border-color: #1a73e8;
+      color: #fff;
+    }
+
+    .word-dialog-actions .primary:hover { background: #1967d2; }
+
+    :host(:fullscreen) { height: 100%; background: #e7e9ee; }
   `;
 
   /** URL of a PDF to open. Relative URLs resolve against the host page. */
   @property({ type: String })
   src = '';
+
+  /** Name stored on new notes and replies. */
+  @property({ type: String })
+  author = 'Guest';
 
   @state() private mode: EditorMode = 'view';
   @state() private tool: PointerTool = 'select';
@@ -887,6 +1824,16 @@ export class PdfEditor extends LitElement {
   @state() private loading = false;
   @state() private errorMessage = '';
   @state() private pageReady = false;
+  @state() private documentKind: 'pdf' | 'word' | 'image' = 'pdf';
+  @state() private wordFit: WordFit = 'percent';
+  @state() private wordPercent = 1;
+  @state() private wordScaleLabel = 100;
+  @state() private wordZoomOpen = false;
+  @state() private wordZoomDraft: WordZoomChoice = 1;
+  @state() private wordMenuOpen = false;
+  @state() private wordFullScreen = false;
+  @state() private previewSettingsOpen = false;
+  @state() private previewTheme: 'light' | 'dark' = 'light';
   @state() private menuOpen = false;
   @state() private zoomOpen = false;
   @state() private searchOpen = false;
@@ -896,7 +1843,18 @@ export class PdfEditor extends LitElement {
   @state() private panning = false;
   @state() private findQuery = '';
   @state() private commentQuery = '';
-  @state() private sortBy = 'position';
+  @state() private sortBy: CommentSort = 'position';
+  @state() private selectingComments = false;
+  @state() private checkedCommentIds: string[] = [];
+  @state() private commentMenuId: string | null = null;
+  @state() private statusMenuId: string | null = null;
+  @state() private menuAnchor: { top: number; left: number } | null = null;
+  @state() private editingCommentId: string | null = null;
+  @state() private editingCommentText = '';
+  @state() private filterOpen = false;
+  @state() private filterTab: FilterTab = 'user';
+  @state() private appliedFilter: CommentFilterState = emptyCommentFilter();
+  @state() private draftFilter: CommentFilterState = emptyCommentFilter();
   @state() private highlights: Array<ViewportBox & { active: boolean }> = [];
   @state() private matchIndex = -1;
   @state() private matchCount = 0;
@@ -921,6 +1879,11 @@ export class PdfEditor extends LitElement {
   @state() private draftArrow: ArrowEnd = 'none';
   @state() private polygonHover: { x: number; y: number } | null = null;
   @state() private noteDraft: NoteDraft | null = null;
+  @state() private notePreview: ViewportBox[] = [];
+  @state() private freeTextBox: { left: number; top: number; width: number; height: number } | null = null;
+  @state() private textSelection: QuickSelection | null = null;
+  @state() private styleMenuOpen = false;
+  @state() private replyText = '';
 
   @query('.viewer') private viewerEl!: HTMLElement;
   @query('.page-canvas') private canvasEl!: HTMLCanvasElement;
@@ -941,10 +1904,17 @@ export class PdfEditor extends LitElement {
   private textRunCache = new Map<number, TextRun[]>();
   private markSeq = 0;
   private dragStart: { x: number; y: number } | null = null;
+  private textSelectStart: { x: number; y: number } | null = null;
+  private quickToken = 0;
+  private selectionToken = 0;
+  private dragToken = 0;
   private imagePoint: { page: number; x: number; y: number } | null = null;
   private pdfBytes: Uint8Array | null = null;
   private sourceUrl = '';
   private downloadName = 'document.pdf';
+  private wordBytes: Uint8Array | null = null;
+  private wordGeneration = 0;
+  private imageUrl: string | null = null;
   @state() private saving = false;
   private textEdits: TextEdit[] = [];
   private panPoint: { x: number; y: number; left: number; top: number } | null = null;
@@ -971,11 +1941,14 @@ export class PdfEditor extends LitElement {
     super.connectedCallback();
     this.addEventListener('keydown', this.onKeydown);
     window.addEventListener('pointerdown', this.onWindowPointerDown);
+    document.addEventListener('fullscreenchange', this.onFullScreenChange);
   }
 
   override disconnectedCallback(): void {
     this.removeEventListener('keydown', this.onKeydown);
     window.removeEventListener('pointerdown', this.onWindowPointerDown);
+    document.removeEventListener('fullscreenchange', this.onFullScreenChange);
+    if (document.fullscreenElement === this) void document.exitFullscreen();
     this.resizeObserver?.disconnect();
     window.clearTimeout(this.searchTimer);
     this.cancelThumbnails();
@@ -983,20 +1956,49 @@ export class PdfEditor extends LitElement {
     this.renderTask?.cancel();
     void this.pdf?.loadingTask.destroy();
     this.pdf = null;
+    this.clearImagePreview();
     super.disconnectedCallback();
   }
 
   protected override firstUpdated(): void {
     this.resizeObserver = new ResizeObserver(() => {
+      if (this.isReadOnlyPreview()) {
+        this.layoutWord();
+        return;
+      }
       if (!this.pdf || this.zoomMode === 'percent') return;
       this.scheduleRender();
     });
-    this.resizeObserver.observe(this.viewerEl);
+    if (this.viewerEl) this.resizeObserver.observe(this.viewerEl);
   }
 
   protected override updated(changed: PropertyValues): void {
     if (changed.has('src') && this.src) {
       void this.load(this.src);
+    }
+    if (changed.has('documentKind')) {
+      const target = this.isReadOnlyPreview()
+        ? this.renderRoot.querySelector('.word-stage')
+        : this.renderRoot.querySelector('.viewer');
+      if (target instanceof HTMLElement) this.resizeObserver?.observe(target);
+    }
+    if (
+      this.isReadOnlyPreview() &&
+      (changed.has('documentKind') ||
+        changed.has('currentPage') ||
+        changed.has('wordFit') ||
+        changed.has('wordPercent') ||
+        changed.has('totalPages') ||
+        changed.has('pageReady'))
+    ) {
+      this.layoutWord();
+      requestAnimationFrame(() => this.layoutWord());
+    }
+    if (changed.has('wordZoomOpen') && this.wordZoomOpen) {
+      void this.updateComplete.then(() => {
+        const ok = this.renderRoot.querySelector('.word-dialog .primary');
+        if (ok instanceof HTMLElement) ok.focus();
+      });
     }
     if (changed.has('pagesPressed') || changed.has('totalPages')) {
       this.thumbsPainted.clear();
@@ -1014,9 +2016,30 @@ export class PdfEditor extends LitElement {
     }
     if (changed.has('noteDraft') && this.noteDraft && !changed.get('noteDraft')) {
       void this.updateComplete.then(() => {
-        const field = this.renderRoot.querySelector('.note-box textarea');
+        const field = this.renderRoot.querySelector('.freetext-editor, .comment-pop textarea, .note-box textarea');
+        if (field instanceof HTMLTextAreaElement) field.focus();
+        this.renderRoot.querySelector('.comment-pop')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      });
+    }
+    if (changed.has('selectedMarkId') && this.selectedMarkId) {
+      void this.updateComplete.then(() => {
+        this.renderRoot.querySelector('.comment-card.selected')?.scrollIntoView({ block: 'nearest' });
+        if (this.selectedNote) {
+          this.renderRoot.querySelector('.comment-pop')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
+      });
+    }
+    if (changed.has('editingCommentId') && this.editingCommentId) {
+      void this.updateComplete.then(() => {
+        const field = this.renderRoot.querySelector('.comment-edit textarea');
         if (field instanceof HTMLTextAreaElement) field.focus();
       });
+    }
+    if (
+      this.selectingComments &&
+      (changed.has('checkedCommentIds') || changed.has('marks') || changed.has('commentQuery') || changed.has('selectingComments') || changed.has('sortBy'))
+    ) {
+      void this.updateComplete.then(() => this.syncSelectAll());
     }
     if (changed.has('formDraft') && this.formDraft && !changed.get('formDraft')) {
       void this.updateComplete.then(() => {
@@ -1026,8 +2049,21 @@ export class PdfEditor extends LitElement {
     }
   }
 
-  /** Open a PDF from a URL, a File, or binary data. */
+  /** Open a PDF, or preview a Word document or image, from a URL, a File, or binary data. */
   async load(source: PdfSource): Promise<void> {
+    if (imageFormat(source)) {
+      await this.loadImage(source);
+      return;
+    }
+    if (wordFormat(source)) {
+      await this.loadWord(source);
+      return;
+    }
+    if (this.documentKind !== 'pdf') this.documentKind = 'pdf';
+    this.wordBytes = null;
+    this.clearImagePreview();
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
     const id = ++this.loadId;
     this.loading = true;
     this.errorMessage = '';
@@ -1037,6 +2073,22 @@ export class PdfEditor extends LitElement {
     this.selectedMarkId = null;
     this.markBoxes = [];
     this.noteDraft = null;
+    this.notePreview = [];
+    this.freeTextBox = null;
+    this.textSelection = null;
+    this.styleMenuOpen = false;
+    this.replyText = '';
+    this.selectingComments = false;
+    this.checkedCommentIds = [];
+    this.commentMenuId = null;
+    this.statusMenuId = null;
+    this.menuAnchor = null;
+    this.editingCommentId = null;
+    this.editingCommentText = '';
+    this.filterOpen = false;
+    this.appliedFilter = emptyCommentFilter();
+    this.draftFilter = emptyCommentFilter();
+    this.selectionToken += 1;
     this.stampMenu = null;
     this.imagePoint = null;
     this.draftBox = null;
@@ -1106,6 +2158,685 @@ export class PdfEditor extends LitElement {
     }
   }
 
+  private async loadWord(source: PdfSource): Promise<void> {
+    const id = ++this.loadId;
+    const format = wordFormat(source);
+    this.documentKind = 'word';
+    this.loading = true;
+    this.errorMessage = '';
+    this.pageReady = false;
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
+    this.wordFit = 'percent';
+    this.wordPercent = 1;
+    this.wordScaleLabel = 100;
+    this.wordZoomDraft = 1;
+    this.totalPages = 0;
+    this.currentPage = 1;
+    this.wordBytes = null;
+    this.clearImagePreview();
+    this.clearSearch();
+    this.releasePdf();
+
+    try {
+      const bytes = await this.sourceBytes(source);
+      if (id !== this.loadId) return;
+      if (!isZipDocument(bytes)) {
+        throw new Error(
+          format === 'doc'
+            ? 'Older .doc files can’t be previewed. Save the document as .docx and open that file.'
+            : 'Could not open this Word document.',
+        );
+      }
+      this.wordBytes = bytes;
+      this.downloadName = this.wordFileName(source);
+      const generation = ++this.wordGeneration;
+      await this.updateComplete;
+      if (id !== this.loadId || this.documentKind !== 'word') return;
+      await this.paintWord(generation);
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.dispatchEvent(
+        new CustomEvent<PdfLoadDetail>('pdf-load', {
+          detail: { pages: this.totalPages },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.pageReady = false;
+      this.wordBytes = null;
+      this.totalPages = 0;
+      const message = this.wordErrorText(error);
+      this.errorMessage = message;
+      this.dispatchEvent(
+        new CustomEvent<PdfErrorDetail>('pdf-error', {
+          detail: { message },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
+
+  private async loadImage(source: PdfSource): Promise<void> {
+    const format = imageFormat(source);
+    const id = ++this.loadId;
+    const generation = ++this.wordGeneration;
+    this.documentKind = 'image';
+    this.loading = true;
+    this.errorMessage = '';
+    this.pageReady = false;
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
+    this.wordFit = 'percent';
+    this.wordPercent = 1;
+    this.wordScaleLabel = 100;
+    this.wordZoomDraft = 1;
+    this.totalPages = 0;
+    this.currentPage = 1;
+    this.wordBytes = null;
+    this.clearImagePreview();
+    this.clearSearch();
+    this.releasePdf();
+    let url: string | null = null;
+
+    try {
+      if (!format) throw new Error('Could not open this image.');
+      const bytes = new Uint8Array(await this.sourceBytes(source, 'Could not read this image.'));
+      if (id !== this.loadId) return;
+      if (!looksLikeImage(bytes, format)) throw new Error('Could not open this image.');
+      const type = format === 'png' ? 'image/png' : 'image/jpeg';
+      url = URL.createObjectURL(new Blob([bytes], { type }));
+      const image = await this.decodePreviewImage(url);
+      if (id !== this.loadId || this.documentKind !== 'image' || generation !== this.wordGeneration) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      this.imageUrl = url;
+      url = null;
+      image.alt = this.imageFileName(source, format);
+      image.draggable = false;
+      this.wordBytes = bytes;
+      this.downloadName = image.alt;
+      await this.updateComplete;
+      if (id !== this.loadId || this.documentKind !== 'image') return;
+      const body = this.renderRoot.querySelector('.word-pages');
+      if (!(body instanceof HTMLElement)) throw new Error('Could not open this image.');
+      body.replaceChildren(image);
+      this.totalPages = 1;
+      this.currentPage = 1;
+      this.pageReady = true;
+      this.loading = false;
+      await this.updateComplete;
+      this.layoutWord();
+      this.dispatchEvent(
+        new CustomEvent<PdfLoadDetail>('pdf-load', {
+          detail: { pages: 1 },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      if (url) URL.revokeObjectURL(url);
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.pageReady = false;
+      this.wordBytes = null;
+      this.clearImagePreview();
+      this.totalPages = 0;
+      const message = this.imageErrorText(error);
+      this.errorMessage = message;
+      this.dispatchEvent(
+        new CustomEvent<PdfErrorDetail>('pdf-error', {
+          detail: { message },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
+
+  private isReadOnlyPreview(): boolean {
+    return this.documentKind === 'word' || this.documentKind === 'image';
+  }
+
+  private clearImagePreview(): void {
+    if (!this.imageUrl) return;
+    URL.revokeObjectURL(this.imageUrl);
+    this.imageUrl = null;
+  }
+
+  private decodePreviewImage(url: string): Promise<HTMLImageElement> {
+    const image = new Image();
+    image.className = 'preview-image';
+    return new Promise((resolve, reject) => {
+      image.onload = () => resolve(image);
+      image.onerror = () => reject(new Error('Could not open this image.'));
+      image.src = url;
+    });
+  }
+
+  private imageFileName(source: PdfSource, format: ImageFormat): string {
+    if (typeof source === 'string') {
+      const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
+      if (/\.(png|jpe?g)$/i.test(part)) return part;
+    }
+    if (source instanceof File && /\.(png|jpe?g)$/i.test(source.name)) return source.name;
+    return format === 'png' ? 'image.png' : 'image.jpg';
+  }
+
+  private imageErrorText(error: unknown): string {
+    if (error instanceof Error && (error.message.startsWith('Could not') || error.message.includes('image'))) {
+      return error.message;
+    }
+    return 'Could not open this image.';
+  }
+
+  private releasePdf(): void {
+    this.renderToken += 1;
+    this.renderTask?.cancel();
+    this.renderTask = null;
+    const previous = this.pdf;
+    this.pdf = null;
+    void previous?.loadingTask.destroy();
+  }
+
+  private async sourceBytes(source: PdfSource, failure = 'Could not read this Word document.'): Promise<Uint8Array> {
+    const read = await this.readSource(source);
+    if (typeof read !== 'string') return read;
+    const response = await fetch(read);
+    if (!response.ok) throw new Error(failure);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
+  private wordFileName(source: PdfSource): string {
+    if (typeof source === 'string') {
+      const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
+      if (/\.docx?$/i.test(part)) return part;
+    }
+    if (source instanceof File && /\.docx?$/i.test(source.name)) return source.name;
+    return 'document.docx';
+  }
+
+  private wordErrorText(error: unknown): string {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Could not') || error.message.includes('.doc') || error.message.includes('no pages'))
+    ) {
+      return error.message;
+    }
+    return 'Could not open this Word document.';
+  }
+
+  private async paintWord(generation: number): Promise<void> {
+    if (!this.wordBytes) throw new Error('Could not open this Word document.');
+    const scratch = document.createElement('div');
+    const count = await renderDocxPages(this.wordBytes, scratch);
+    if (generation !== this.wordGeneration || this.documentKind !== 'word') return;
+    const body = this.renderRoot.querySelector('.word-pages');
+    if (!(body instanceof HTMLElement)) throw new Error('Could not open this Word document.');
+    if (count < 1) throw new Error('This Word document has no pages to preview.');
+    body.replaceChildren(...scratch.childNodes);
+    this.totalPages = count;
+    this.currentPage = 1;
+    this.pageReady = true;
+    await this.updateComplete;
+    this.layoutWord();
+  }
+
+  private layoutWord(): void {
+    if (!this.isReadOnlyPreview()) return;
+    const stage = this.renderRoot.querySelector('.word-stage');
+    const frame = this.renderRoot.querySelector('.word-frame');
+    const host = this.renderRoot.querySelector('.word-pages');
+    if (!(stage instanceof HTMLElement) || !(frame instanceof HTMLElement) || !(host instanceof HTMLElement)) return;
+    if (stage.clientWidth < 40 || stage.clientHeight < 40) return;
+    host.style.transform = 'none';
+    if (this.documentKind === 'image') {
+      const image = host.querySelector('img.preview-image');
+      if (!(image instanceof HTMLImageElement)) return;
+      this.applyPreviewScale(stage, frame, host, image.naturalWidth, image.naturalHeight);
+      return;
+    }
+    const pages = [...host.querySelectorAll('section.docx')] as HTMLElement[];
+    if (pages.length === 0) return;
+    const index = Math.min(Math.max(this.currentPage, 1), pages.length) - 1;
+    pages.forEach((page, pageIndex) => {
+      page.hidden = pageIndex !== index;
+    });
+    const page = pages[index];
+    this.applyPreviewScale(stage, frame, host, page.offsetWidth, page.offsetHeight);
+  }
+
+  private applyPreviewScale(stage: HTMLElement, frame: HTMLElement, host: HTMLElement, naturalW: number, naturalH: number): void {
+    if (naturalW < 2 || naturalH < 2) return;
+    let scale = this.wordPercent;
+    if (this.wordFit === 'page') {
+      scale = Math.min((stage.clientWidth - 48) / naturalW, (stage.clientHeight - 48) / naturalH);
+    } else if (this.wordFit === 'width') {
+      scale = (stage.clientWidth - 48) / naturalW;
+    }
+    scale = Math.min(Math.max(scale, 0.2), 4);
+    frame.style.width = `${Math.ceil(naturalW * scale)}px`;
+    frame.style.height = `${Math.ceil(naturalH * scale)}px`;
+    host.style.width = `${naturalW}px`;
+    host.style.height = `${naturalH}px`;
+    host.style.transform = `scale(${scale})`;
+    const label = Math.round(scale * 100);
+    if (label !== this.wordScaleLabel) this.wordScaleLabel = label;
+  }
+
+  private wordGo(delta: number): void {
+    if (this.totalPages < 1) return;
+    const next = Math.min(this.totalPages, Math.max(1, this.currentPage + delta));
+    this.wordMenuOpen = false;
+    if (next !== this.currentPage) {
+      this.currentPage = next;
+      const stage = this.renderRoot.querySelector('.word-stage');
+      if (stage instanceof HTMLElement) stage.scrollTop = 0;
+    }
+  }
+
+  private openWordZoom(): void {
+    this.wordMenuOpen = false;
+    this.previewSettingsOpen = false;
+    if (this.wordFit === 'page' || this.wordFit === 'width') this.wordZoomDraft = this.wordFit;
+    else this.wordZoomDraft = this.nearestWordPercent(this.wordPercent);
+    this.wordZoomOpen = true;
+  }
+
+  private nearestWordPercent(value: number): number {
+    return WORD_ZOOM_LEVELS.reduce((best, step) => (Math.abs(step - value) < Math.abs(best - value) ? step : best), 1);
+  }
+
+  private applyWordZoom(): void {
+    const choice = this.wordZoomDraft;
+    if (choice === 'page' || choice === 'width') this.wordFit = choice;
+    else {
+      this.wordFit = 'percent';
+      this.wordPercent = choice;
+    }
+    this.wordZoomOpen = false;
+  }
+
+  private onWordZoomKey(event: KeyboardEvent): void {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    event.stopPropagation();
+    this.applyWordZoom();
+  }
+
+  private toggleWordMenu(): void {
+    this.wordMenuOpen = !this.wordMenuOpen;
+    this.wordZoomOpen = false;
+    this.previewSettingsOpen = false;
+  }
+
+  private openPreviewSettings(): void {
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
+    this.menuOpen = false;
+    this.zoomOpen = false;
+    this.searchOpen = false;
+    this.previewSettingsOpen = true;
+  }
+
+  private setPreviewTheme(theme: 'light' | 'dark'): void {
+    this.previewTheme = theme;
+  }
+
+  private toggleWordFullScreen(): void {
+    this.wordMenuOpen = false;
+    this.menuOpen = false;
+    if (document.fullscreenElement === this) {
+      void document.exitFullscreen();
+      return;
+    }
+    void this.requestFullscreen().catch(() => undefined);
+  }
+
+  private onFullScreenChange = (): void => {
+    this.wordFullScreen = document.fullscreenElement === this;
+  };
+
+  private previewMime(name: string): string {
+    const lower = name.toLowerCase();
+    if (lower.endsWith('.png')) return 'image/png';
+    if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.doc') && !lower.endsWith('.docx')) return 'application/msword';
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+
+  private previewExtension(name: string): string {
+    const dot = name.lastIndexOf('.');
+    return dot >= 0 ? name.slice(dot) : '';
+  }
+
+  private ensureExtension(name: string, extension: string): string {
+    if (!extension) return name;
+    return name.toLowerCase().endsWith(extension.toLowerCase()) ? name : `${name}${extension}`;
+  }
+
+  private downloadOriginal(): void {
+    if (!this.wordBytes) return;
+    this.wordMenuOpen = false;
+    this.downloadBytes(this.downloadName);
+  }
+
+  private downloadBytes(name: string): void {
+    if (!this.wordBytes) return;
+    const type = this.previewMime(name);
+    const copy = new Uint8Array(this.wordBytes);
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  private async savePreviewAs(): Promise<void> {
+    if (!this.wordBytes) return;
+    this.wordMenuOpen = false;
+    const suggested = this.downloadName;
+    const type = this.previewMime(suggested);
+    const extension = this.previewExtension(suggested);
+    const picker = (window as unknown as PreviewSavePicker).showSaveFilePicker;
+    if (typeof picker === 'function') {
+      try {
+        const handle = await picker({
+          suggestedName: suggested,
+          types: extension ? [{ description: 'Document', accept: { [type]: [extension] } }] : undefined,
+        });
+        const writable = await handle.createWritable();
+        const copy = new Uint8Array(this.wordBytes);
+        await writable.write(new Blob([copy.buffer], { type }));
+        await writable.close();
+        if (handle.name) this.downloadName = handle.name;
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+      }
+    }
+    const chosen = window.prompt('Save as', suggested);
+    if (!chosen?.trim()) return;
+    const name = this.ensureExtension(chosen.trim(), extension);
+    this.downloadName = name;
+    this.downloadBytes(name);
+  }
+
+  private printPreview(): void {
+    if (!this.wordBytes) return;
+    this.wordMenuOpen = false;
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+    document.body.append(iframe);
+    const doc = iframe.contentDocument;
+    const frameWindow = iframe.contentWindow;
+    if (!doc || !frameWindow) {
+      iframe.remove();
+      return;
+    }
+    const style = doc.createElement('style');
+    style.textContent = `
+      @page { margin: 12mm; }
+      html, body { margin: 0; background: #fff; }
+      section.docx { break-after: page; box-shadow: none !important; margin: 0 auto !important; }
+      img.preview-image { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+    `;
+    doc.head.append(style);
+    if (this.documentKind === 'image') {
+      const image = this.renderRoot.querySelector('img.preview-image');
+      if (image) doc.body.append(doc.importNode(image, true));
+    } else {
+      this.renderRoot.querySelectorAll('.word-pages style').forEach((node) => {
+        doc.head.append(doc.importNode(node, true));
+      });
+      const frameElement = doc.defaultView?.Element;
+      this.renderRoot.querySelectorAll('.word-pages section.docx').forEach((node) => {
+        const copy = doc.importNode(node, true);
+        if (frameElement && copy instanceof frameElement) copy.removeAttribute('hidden');
+        doc.body.append(copy);
+      });
+    }
+    const cleanup = (): void => {
+      frameWindow.removeEventListener('afterprint', cleanup);
+      iframe.remove();
+    };
+    frameWindow.addEventListener('afterprint', cleanup);
+    window.setTimeout(cleanup, 120000);
+    requestAnimationFrame(() => {
+      frameWindow.focus();
+      frameWindow.print();
+    });
+  }
+
+  private focusWordStage(event: PointerEvent): void {
+    const target = event.target;
+    if (target instanceof Element && target.closest('button, a, input, textarea, select, label')) return;
+    const stage = event.currentTarget;
+    if (stage instanceof HTMLElement) stage.focus({ preventScroll: true });
+  }
+
+  private onWordKeydown(event: KeyboardEvent): void {
+    if (this.previewSettingsOpen || this.wordZoomOpen) {
+      if (event.key === 'Escape') {
+        this.previewSettingsOpen = false;
+        this.wordZoomOpen = false;
+        event.preventDefault();
+      }
+      return;
+    }
+    if (event.key === 'Escape') {
+      if (this.wordMenuOpen) {
+        this.wordMenuOpen = false;
+        event.preventDefault();
+        return;
+      }
+      if (document.fullscreenElement === this) {
+        void document.exitFullscreen();
+        event.preventDefault();
+      }
+      return;
+    }
+    const target = event.composedPath()[0];
+    if (target instanceof HTMLElement && target.closest('input, textarea, select')) return;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.key === 'PageUp') {
+      this.wordGo(-1);
+      event.preventDefault();
+    } else if (event.key === 'ArrowRight' || event.key === 'ArrowDown' || event.key === 'PageDown') {
+      this.wordGo(1);
+      event.preventDefault();
+    }
+  }
+
+  private previewStatus(): string {
+    if (this.errorMessage) return this.errorMessage;
+    if (this.loading) return this.documentKind === 'image' ? 'Opening image…' : 'Opening document…';
+    return this.documentKind === 'image' ? 'Open an image to preview it.' : 'Open a Word document to preview it.';
+  }
+
+  private get fileReady(): boolean {
+    return this.pdf !== null && !this.saving;
+  }
+
+  private settingsDialog() {
+    if (!this.previewSettingsOpen) return null;
+    return html`
+      <div
+        class="word-modal"
+        @click=${(event: Event) => {
+          if (event.target === event.currentTarget) this.previewSettingsOpen = false;
+        }}
+      >
+        <div class="word-dialog" role="dialog" aria-label="Settings">
+          <h2>Settings</h2>
+          <p class="settings-label">Theme</p>
+          <label class="zoom-option">
+            <input
+              type="radio"
+              name="preview-theme"
+              .checked=${this.previewTheme === 'light'}
+              @change=${() => this.setPreviewTheme('light')}
+            />
+            <span>Light</span>
+          </label>
+          <label class="zoom-option">
+            <input
+              type="radio"
+              name="preview-theme"
+              .checked=${this.previewTheme === 'dark'}
+              @change=${() => this.setPreviewTheme('dark')}
+            />
+            <span>Dark</span>
+          </label>
+          <div class="word-dialog-actions">
+            <button class="primary" type="button" @click=${() => { this.previewSettingsOpen = false; }}>Close</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private wordView() {
+    const pageLabel = this.totalPages > 0 ? `Page ${this.currentPage} of ${this.totalPages}` : 'No document';
+    const zoomChoices: Array<{ label: string; value: WordZoomChoice }> = [
+      { label: 'Full Page', value: 'page' },
+      { label: 'Page Width', value: 'width' },
+      ...WORD_ZOOM_LEVELS.map((level) => ({ label: `${Math.round(level * 100)}%`, value: level as WordZoomChoice })),
+    ];
+    return html`
+      <div
+        class="root ${this.previewTheme === 'dark' ? 'preview-dark' : ''}"
+        @dragenter=${this.onDragEnter}
+        @dragover=${this.onDragOver}
+        @dragleave=${this.onDragLeave}
+        @drop=${this.onDrop}
+      >
+        <div class="word-stage" tabindex="-1" @pointerdown=${this.focusWordStage}>
+          <div class="word-frame"><div class="word-pages"></div></div>
+          ${this.pageReady
+            ? null
+            : html`
+                <div class="status ${this.errorMessage ? 'error' : ''}">
+                  ${this.previewStatus()}
+                </div>
+              `}
+          ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, or image</div>` : null}
+        </div>
+        <footer class="word-bar">
+          <div class="word-page">
+            ${iconPages}
+            <span class="word-page-label">${pageLabel}</span>
+          </div>
+          <div class="word-actions">
+            <button
+              class="word-zoom"
+              type="button"
+              aria-label="Zoom"
+              aria-haspopup="dialog"
+              ?disabled=${this.totalPages < 1}
+              @click=${() => this.openWordZoom()}
+            >
+              <span>${this.wordScaleLabel}%</span>
+              ${iconChevron}
+            </button>
+            <div class="word-menu-root">
+              <button
+                class="icon"
+                type="button"
+                aria-label="Menu"
+                title="Menu"
+                aria-haspopup="menu"
+                aria-expanded=${this.wordMenuOpen}
+                @click=${() => this.toggleWordMenu()}
+              >
+                ${iconMenu}
+              </button>
+              ${this.wordMenuOpen
+                ? html`
+                    <div class="word-pop" role="menu">
+                      <button type="button" role="menuitem" @click=${() => this.chooseFile()}>
+                        ${iconOpen}<span>Open</span>
+                      </button>
+                      <button type="button" role="menuitem" ?disabled=${!this.wordBytes} @click=${() => this.downloadOriginal()}>
+                        ${iconPreviewDownload()}<span>Download</span>
+                      </button>
+                      <button type="button" role="menuitem" @click=${() => this.toggleWordFullScreen()}>
+                        ${this.wordFullScreen ? iconExitFullScreen() : iconEnterFullScreen()}
+                        <span>${this.wordFullScreen ? 'Exit Full Screen' : 'Enter Full Screen'}</span>
+                      </button>
+                      <button type="button" role="menuitem" ?disabled=${!this.wordBytes} @click=${() => void this.savePreviewAs()}>
+                        ${iconSave}<span>Save As</span>
+                      </button>
+                      <button type="button" role="menuitem" ?disabled=${!this.wordBytes} @click=${() => this.printPreview()}>
+                        ${iconPreviewPrint()}<span>Print</span>
+                      </button>
+                      <div class="rule"></div>
+                      <button type="button" role="menuitem" @click=${() => this.openPreviewSettings()}>
+                        ${iconPreviewSettings()}<span>Settings</span>
+                      </button>
+                    </div>
+                  `
+                : null}
+            </div>
+            <button
+              class="icon"
+              type="button"
+              aria-label=${this.wordFullScreen ? 'Exit full screen' : 'Full Screen'}
+              title=${this.wordFullScreen ? 'Exit full screen' : 'Full Screen'}
+              aria-pressed=${this.wordFullScreen}
+              @click=${() => this.toggleWordFullScreen()}
+            >
+              ${this.wordFullScreen ? iconExitFullScreen() : iconEnterFullScreen()}
+            </button>
+          </div>
+        </footer>
+        ${this.wordZoomOpen
+          ? html`
+              <div
+                class="word-modal"
+                @click=${(event: Event) => {
+                  if (event.target === event.currentTarget) this.wordZoomOpen = false;
+                }}
+              >
+                <div class="word-dialog" role="dialog" aria-label="Zoom to" @keydown=${this.onWordZoomKey}>
+                  <h2>Zoom to</h2>
+                  ${zoomChoices.map(
+                    (choice) => html`
+                      <label class="zoom-option">
+                        <input
+                          type="radio"
+                          name="word-zoom"
+                          .checked=${this.wordZoomDraft === choice.value}
+                          @change=${() => {
+                            this.wordZoomDraft = choice.value;
+                          }}
+                        />
+                        <span>${choice.label}</span>
+                      </label>
+                    `,
+                  )}
+                  <div class="word-dialog-actions">
+                    <button class="primary" type="button" @click=${() => this.applyWordZoom()}>OK</button>
+                    <button type="button" @click=${() => { this.wordZoomOpen = false; }}>Cancel</button>
+                  </div>
+                </div>
+              </div>
+            `
+          : null}
+        ${this.settingsDialog()}
+        <input class="file-input" type="file" accept=${OPEN_ACCEPT} @change=${this.onFileChosen} />
+      </div>
+    `;
+  }
+
   private async openKept(source: Uint8Array | string): Promise<PDFDocumentProxy> {
     if (typeof source === 'string') {
       this.sourceUrl = source;
@@ -1137,27 +2868,113 @@ export class PdfEditor extends LitElement {
     return 'document.pdf';
   }
 
+  private async exportedPdfBytes(): Promise<Uint8Array> {
+    const drawn: DrawnMark[] = [];
+    for (const mark of this.marks) {
+      const image = mark.kind === 'image' && mark.src ? await this.imageForSave(mark.src) : null;
+      drawn.push({
+        kind: mark.kind,
+        page: mark.page,
+        rects: mark.rects,
+        text: mark.text,
+        points: mark.points,
+        image: image?.bytes,
+        imageType: image?.type,
+      });
+    }
+    return applyMarks(await this.ensureBytes(), drawn);
+  }
+
   private async save(): Promise<void> {
     if (!this.pdf || this.saving) return;
+    this.menuOpen = false;
     this.saving = true;
     try {
-      const drawn: DrawnMark[] = [];
-      for (const mark of this.marks) {
-        const image = mark.kind === 'image' && mark.src ? await this.imageForSave(mark.src) : null;
-        drawn.push({
-          kind: mark.kind,
-          page: mark.page,
-          rects: mark.rects,
-          text: mark.text,
-          points: mark.points,
-          image: image?.bytes,
-          imageType: image?.type,
-        });
-      }
-      const bytes = await applyMarks(await this.ensureBytes(), drawn);
-      this.downloadFile(bytes, this.downloadName);
+      this.downloadFile(await this.exportedPdfBytes(), this.downloadName);
     } catch (error) {
       this.reportError('Could not save this PDF.', error);
+    } finally {
+      this.saving = false;
+    }
+  }
+
+  private downloadPdf(): void {
+    void this.save();
+  }
+
+  private async savePdfAs(): Promise<void> {
+    if (!this.pdf || this.saving) return;
+    this.menuOpen = false;
+    const suggested = this.downloadName.toLowerCase().endsWith('.pdf') ? this.downloadName : 'document.pdf';
+    const picker = (window as unknown as PreviewSavePicker).showSaveFilePicker;
+    if (typeof picker === 'function') {
+      try {
+        const handle = await picker({
+          suggestedName: suggested,
+          types: [{ description: 'PDF', accept: { 'application/pdf': ['.pdf'] } }],
+        });
+        this.saving = true;
+        const bytes = await this.exportedPdfBytes();
+        const writable = await handle.createWritable();
+        const copy = new Uint8Array(bytes);
+        await writable.write(new Blob([copy.buffer], { type: 'application/pdf' }));
+        await writable.close();
+        if (handle.name) this.downloadName = handle.name;
+        this.saving = false;
+        return;
+      } catch (error) {
+        this.saving = false;
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        this.reportError('Could not save this PDF.', error);
+        return;
+      }
+    }
+    const chosen = window.prompt('Save as', suggested);
+    if (!chosen?.trim()) return;
+    const name = chosen.trim().toLowerCase().endsWith('.pdf') ? chosen.trim() : `${chosen.trim()}.pdf`;
+    this.downloadName = name;
+    await this.save();
+  }
+
+  private async printPdf(): Promise<void> {
+    if (!this.pdf || this.saving) return;
+    this.menuOpen = false;
+    const pageCount = this.totalPages;
+    this.saving = true;
+    try {
+      const bytes = await this.exportedPdfBytes();
+      const printed = await openDocument(bytes.slice());
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('aria-hidden', 'true');
+      iframe.style.cssText = 'position:fixed;width:0;height:0;border:0;right:0;bottom:0';
+      document.body.append(iframe);
+      const doc = iframe.contentDocument;
+      const frameWindow = iframe.contentWindow;
+      if (!doc || !frameWindow) {
+        iframe.remove();
+        await printed.loadingTask.destroy();
+        return;
+      }
+      const style = doc.createElement('style');
+      style.textContent = '@page { margin: 12mm; } body { margin: 0; } canvas { display: block; width: 100%; height: auto; break-after: page; }';
+      doc.head.append(style);
+      for (let page = 1; page <= pageCount; page += 1) {
+        const canvas = doc.createElement('canvas');
+        doc.body.append(canvas);
+        const task = await paintPage(printed, page, canvas, 1.5);
+        await task.promise;
+      }
+      await printed.loadingTask.destroy();
+      const cleanup = (): void => {
+        frameWindow.removeEventListener('afterprint', cleanup);
+        iframe.remove();
+      };
+      frameWindow.addEventListener('afterprint', cleanup);
+      window.setTimeout(cleanup, 120000);
+      frameWindow.focus();
+      frameWindow.print();
+    } catch (error) {
+      this.reportError('Could not print this PDF.', error);
     } finally {
       this.saving = false;
     }
@@ -1331,6 +3148,12 @@ export class PdfEditor extends LitElement {
     if (next === this.currentPage) return;
     this.highlights = [];
     this.noteDraft = null;
+    this.notePreview = [];
+    this.freeTextBox = null;
+    this.textSelection = null;
+    this.styleMenuOpen = false;
+    this.textSelectStart = null;
+    this.selectionToken += 1;
     this.stampMenu = null;
     this.imagePoint = null;
     this.dragStart = null;
@@ -1493,6 +3316,7 @@ export class PdfEditor extends LitElement {
 
   private chooseFile(): void {
     this.menuOpen = false;
+    this.wordMenuOpen = false;
     this.fileInput.click();
   }
 
@@ -1504,7 +3328,31 @@ export class PdfEditor extends LitElement {
   }
 
   private onKeydown = (event: KeyboardEvent): void => {
+    if (this.isReadOnlyPreview()) {
+      this.onWordKeydown(event);
+      return;
+    }
     if (event.key === 'Escape') {
+      if (this.previewSettingsOpen) {
+        this.previewSettingsOpen = false;
+        event.preventDefault();
+        return;
+      }
+      if (this.filterOpen) {
+        this.closeFilter();
+        event.preventDefault();
+        return;
+      }
+      if (this.commentMenuId || this.statusMenuId) {
+        this.closeCommentMenus();
+        event.preventDefault();
+        return;
+      }
+      if (this.editingCommentId) {
+        this.cancelEditComment();
+        event.preventDefault();
+        return;
+      }
       if (this.noteDraft || this.editDraft || this.formDraft || this.draftStroke.length > 0 || this.stampMenu) {
         this.cancelDraft();
         event.preventDefault();
@@ -1543,14 +3391,38 @@ export class PdfEditor extends LitElement {
 
   private onWindowPointerDown = (event: PointerEvent): void => {
     const path = event.composedPath();
+    if (this.wordMenuOpen) {
+      const menu = this.renderRoot.querySelector('.word-menu-root');
+      if (menu && !path.includes(menu)) this.wordMenuOpen = false;
+    }
     if (this.menuOpen && this.menuRoot && !path.includes(this.menuRoot)) this.menuOpen = false;
     if (this.zoomOpen && this.zoomRoot && !path.includes(this.zoomRoot)) this.zoomOpen = false;
     if (this.searchOpen && this.searchRoot && !path.includes(this.searchRoot)) this.searchOpen = false;
+    if (this.commentMenuId || this.statusMenuId) {
+      const inside = path.some(
+        (node) => node instanceof HTMLElement && (node.classList.contains('comment-menu') || node.classList.contains('comment-menu-btn')),
+      );
+      if (!inside) this.closeCommentMenus();
+    }
   };
 
   private onPointerDown(event: PointerEvent): void {
     if (event.button !== 0) return;
-    if (this.eventIn(event, '.note-box') || this.eventIn(event, '.stamp-menu') || this.eventIn(event, '.text-line') || this.eventIn(event, '.field-target')) return;
+    if (
+      this.eventIn(event, '.note-box') ||
+      this.eventIn(event, '.freetext-editor') ||
+      this.eventIn(event, '.quick-bar') ||
+      this.eventIn(event, '.quick-styles') ||
+      this.eventIn(event, '.stamp-menu') ||
+      this.eventIn(event, '.text-line') ||
+      this.eventIn(event, '.field-target')
+    ) {
+      return;
+    }
+    if (this.noteDraft?.kind === 'freetext') {
+      this.commitFreeText();
+      return;
+    }
     this.stampMenu = null;
     if (this.tool === 'hand') {
       this.panPoint = {
@@ -1571,7 +3443,14 @@ export class PdfEditor extends LitElement {
       this.capturePointer(event);
       return;
     }
-    if (this.canDraw && (kind === 'note' || kind === 'freetext' || kind === 'text' || kind === 'image' || kind === 'stamp' || kind === 'initials' || kind === 'date')) {
+    if (this.canDraw && kind === 'freetext') {
+      const point = this.canvasPoint(event);
+      if (!point) return;
+      this.dragStart = point;
+      this.capturePointer(event);
+      return;
+    }
+    if (this.canDraw && (kind === 'text' || kind === 'image' || kind === 'stamp' || kind === 'initials' || kind === 'date')) {
       const point = this.canvasPoint(event);
       if (!point) return;
       this.dragStart = point;
@@ -1583,6 +3462,11 @@ export class PdfEditor extends LitElement {
       if (!point) return;
       this.cancelDraft();
       this.dragStart = point;
+      this.dragToken = this.selectionToken;
+      if (kind === 'note') {
+        this.selectedMarkId = null;
+        this.replyText = '';
+      }
       if (kind === 'pen' || kind === 'signature') this.draftStroke = [point];
       if (kind === 'callout') {
         this.draftStroke = [point, point];
@@ -1595,12 +3479,29 @@ export class PdfEditor extends LitElement {
       this.capturePointer(event);
       return;
     }
+    if (!this.canDraw && !this.editText && this.pdf) {
+      const point = this.canvasPoint(event);
+      if (point) {
+        this.quickToken += 1;
+        this.textSelectStart = point;
+        this.textSelection = null;
+        this.styleMenuOpen = false;
+        this.capturePointer(event);
+      }
+    }
     const markId = this.markIdFromEvent(event);
+    if (markId !== this.selectedMarkId) this.replyText = '';
     this.selectedMarkId = markId;
     void this.refreshMarkBoxes();
   }
 
   private onPointerMove(event: PointerEvent): void {
+    if (this.textSelectStart && !this.canDraw) {
+      const point = this.canvasPoint(event);
+      if (!point) return;
+      this.draftBox = this.boxBetween(this.textSelectStart, point);
+      return;
+    }
     if (this.dragStart && this.canDraw && (this.drawKind === 'pen' || this.drawKind === 'signature')) {
       const point = this.canvasPoint(event);
       if (!point) return;
@@ -1625,8 +3526,6 @@ export class PdfEditor extends LitElement {
     if (
       this.dragStart &&
       this.canDraw &&
-      this.drawKind !== 'note' &&
-      this.drawKind !== 'freetext' &&
       this.drawKind !== 'text' &&
       this.drawKind !== 'image' &&
       this.drawKind !== 'stamp' &&
@@ -1647,13 +3546,32 @@ export class PdfEditor extends LitElement {
   }
 
   private onPointerUp(event: PointerEvent): void {
+    if (this.textSelectStart && !this.canDraw) {
+      const start = this.textSelectStart;
+      const token = this.quickToken;
+      const point = this.canvasPoint(event) ?? start;
+      this.textSelectStart = null;
+      this.draftBox = null;
+      if (Math.hypot(point.x - start.x, point.y - start.y) >= 4) void this.openQuickSelection(start, point, token);
+      return;
+    }
     if (this.dragStart && this.canDraw && this.drawKind) {
       const start = this.dragStart;
       const point = this.canvasPoint(event) ?? start;
       const kind = this.drawKind;
       this.dragStart = null;
       const distance = Math.hypot(point.x - start.x, point.y - start.y);
-      if (kind === 'note' || kind === 'freetext' || kind === 'text' || kind === 'initials') {
+      if (kind === 'note') {
+        this.draftBox = null;
+        if (distance >= 4) void this.openNoteFromSelection(start, point, this.dragToken);
+        return;
+      }
+      if (kind === 'freetext') {
+        this.draftBox = null;
+        this.openFreeText(start, point);
+        return;
+      }
+      if (kind === 'text' || kind === 'initials') {
         this.draftBox = null;
         if (distance < 8) this.openText(kind, start);
         return;
@@ -1735,6 +3653,7 @@ export class PdfEditor extends LitElement {
 
   private onPointerCancel(): void {
     this.dragStart = null;
+    this.textSelectStart = null;
     this.draftBox = null;
     this.panPoint = null;
     this.panning = false;
@@ -2092,7 +4011,318 @@ export class PdfEditor extends LitElement {
     if (this.currentPage === pageNumber) await this.refreshMarkBoxes();
   }
 
-  private openText(kind: 'note' | 'freetext' | 'text' | 'initials', point: { x: number; y: number }): void {
+  private async openNoteFromSelection(
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    token: number,
+  ): Promise<void> {
+    const pdf = this.pdf;
+    const pageNumber = this.currentPage;
+    if (!pdf || this.markupKind !== 'note') return;
+    const page = await pdf.getPage(pageNumber);
+    if (this.pdf !== pdf || token !== this.selectionToken || this.markupKind !== 'note') return;
+    const viewport = page.getViewport({ scale: this.scale });
+    const from = viewportToPdf(viewport, start.x, start.y);
+    const to = viewportToPdf(viewport, end.x, end.y);
+    const drag = pdfRectFromPoints(from.x, from.y, to.x, to.y);
+    const probe = {
+      x: drag.x,
+      y: drag.y - 4,
+      width: drag.width,
+      height: drag.height + 8,
+    };
+    const runs = await this.wordsForPage(pageNumber);
+    if (this.pdf !== pdf || token !== this.selectionToken || this.markupKind !== 'note') return;
+    const hit = runs.filter((run) => rectsIntersect(probe, run.rect));
+    if (hit.length === 0) return;
+    const rects = hit.map((run) => run.rect);
+    const quote = hit.map((run) => run.text).join(' ');
+    this.commentsOpen = true;
+    this.replyText = '';
+    this.selectedMarkId = null;
+    this.notePreview = rects.map((rect) => projectRect(viewport, rect));
+    this.noteDraft = {
+      kind: 'note',
+      page: pageNumber,
+      pdfX: rects[0].x,
+      pdfY: rects[0].y + rects[0].height,
+      left: this.notePreview[0].left,
+      top: this.notePreview[0].top,
+      text: '',
+      tip: null,
+      rect: null,
+      quote,
+      rects,
+      author: this.authorName,
+      createdAt: Date.now(),
+    };
+  }
+
+  private openFreeText(start: { x: number; y: number }, end: { x: number; y: number }): void {
+    const pdf = this.pdf;
+    const pageNumber = this.currentPage;
+    if (!pdf) return;
+    const distance = Math.hypot(end.x - start.x, end.y - start.y);
+    const left = distance >= 8 ? Math.min(start.x, end.x) : start.x;
+    const top = distance >= 8 ? Math.min(start.y, end.y) : start.y;
+    const width = distance >= 8 ? Math.max(Math.abs(end.x - start.x), 96) : 180;
+    const height = distance >= 8 ? Math.max(Math.abs(end.y - start.y), 32) : 40;
+    void pdf.getPage(pageNumber).then((page) => {
+      if (this.pdf !== pdf || this.currentPage !== pageNumber || this.markupKind !== 'freetext') return;
+      const pdfPoint = viewportToPdf(page.getViewport({ scale: this.scale }), left, top);
+      this.freeTextBox = { left, top, width, height };
+      this.noteDraft = {
+        kind: 'freetext',
+        page: pageNumber,
+        pdfX: pdfPoint.x,
+        pdfY: pdfPoint.y,
+        left,
+        top,
+        text: '',
+        tip: null,
+        rect: null,
+        quote: '',
+        rects: [],
+        author: '',
+        createdAt: 0,
+      };
+    });
+  }
+
+  private commitFreeText(): void {
+    const draft = this.noteDraft;
+    const box = this.freeTextBox;
+    if (!draft || draft.kind !== 'freetext') return;
+    const text = draft.text.trim();
+    this.noteDraft = null;
+    this.freeTextBox = null;
+    if (!text) return;
+    const width = Math.max((box?.width ?? 120) / this.scale, 1);
+    const height = Math.max((box?.height ?? 24) / this.scale, 1);
+    const mark = this.makeMark('freetext', draft.page, [{ x: draft.pdfX, y: draft.pdfY - height, width, height }], text);
+    this.marks = [...this.marks, mark];
+    this.selectedMarkId = mark.id;
+    void this.refreshMarkBoxes();
+  }
+
+  private async openQuickSelection(
+    start: { x: number; y: number },
+    end: { x: number; y: number },
+    token: number,
+  ): Promise<void> {
+    const pdf = this.pdf;
+    const pageNumber = this.currentPage;
+    if (!pdf) return;
+    const page = await pdf.getPage(pageNumber);
+    if (this.pdf !== pdf || token !== this.quickToken) return;
+    const viewport = page.getViewport({ scale: this.scale });
+    const from = viewportToPdf(viewport, start.x, start.y);
+    const to = viewportToPdf(viewport, end.x, end.y);
+    const drag = pdfRectFromPoints(from.x, from.y, to.x, to.y);
+    const probe = { x: drag.x, y: drag.y - 4, width: drag.width, height: drag.height + 8 };
+    const runs = await this.wordsForPage(pageNumber);
+    if (this.pdf !== pdf || token !== this.quickToken) return;
+    const hit = runs.filter((run) => rectsIntersect(probe, run.rect));
+    if (hit.length === 0) {
+      this.textSelection = null;
+      return;
+    }
+    const rects = hit.map((run) => run.rect);
+    this.selectedMarkId = null;
+    this.styleMenuOpen = false;
+    this.textSelection = {
+      page: pageNumber,
+      rects,
+      quote: hit.map((run) => run.text).join(' '),
+      boxes: rects.map((rect) => projectRect(viewport, rect)),
+    };
+  }
+
+  private selectionMarkupIds(): string[] {
+    const selection = this.textSelection;
+    if (!selection) return [];
+    return this.marks
+      .filter(
+        (mark) =>
+          mark.page === selection.page &&
+          mark.rects.some((rect) => selection.rects.some((hit) => rectsIntersect(rect, hit))),
+      )
+      .map((mark) => mark.id);
+  }
+
+  private commentOnSelection(): void {
+    const selection = this.textSelection;
+    if (!selection || selection.rects.length === 0) return;
+    const first = selection.rects[0];
+    this.commentsOpen = true;
+    this.replyText = '';
+    this.selectedMarkId = null;
+    this.styleMenuOpen = false;
+    this.notePreview = selection.boxes;
+    this.noteDraft = {
+      kind: 'note',
+      page: selection.page,
+      pdfX: first.x,
+      pdfY: first.y + first.height,
+      left: selection.boxes[0]?.left ?? 0,
+      top: selection.boxes[0]?.top ?? 0,
+      text: '',
+      tip: null,
+      rect: null,
+      quote: selection.quote,
+      rects: selection.rects,
+      author: this.authorName,
+      createdAt: Date.now(),
+    };
+    this.textSelection = null;
+  }
+
+  private applySelectionStyle(kind: 'highlight' | 'underline' | 'strike'): void {
+    const selection = this.textSelection;
+    if (!selection) return;
+    const mark = this.makeMark(kind, selection.page, selection.rects, selection.quote);
+    this.marks = [...this.marks, mark];
+    this.selectedMarkId = mark.id;
+    this.textSelection = null;
+    this.styleMenuOpen = false;
+    void this.refreshMarkBoxes();
+  }
+
+  private linkOnSelection(): void {
+    const selection = this.textSelection;
+    if (!selection || selection.rects.length === 0) return;
+    const x1 = Math.min(...selection.rects.map((rect) => rect.x));
+    const y1 = Math.min(...selection.rects.map((rect) => rect.y));
+    const x2 = Math.max(...selection.rects.map((rect) => rect.x + rect.width));
+    const y2 = Math.max(...selection.rects.map((rect) => rect.y + rect.height));
+    const anchor = selection.boxes[selection.boxes.length - 1];
+    this.noteDraft = {
+      kind: 'link',
+      page: selection.page,
+      pdfX: x1,
+      pdfY: y1,
+      left: anchor?.left ?? 0,
+      top: (anchor?.top ?? 0) + (anchor?.height ?? 0) + 8,
+      text: '',
+      tip: null,
+      rect: { x: x1, y: y1, width: Math.max(x2 - x1, 1), height: Math.max(y2 - y1, 1) },
+      quote: selection.quote,
+      rects: selection.rects,
+      author: '',
+      createdAt: 0,
+    };
+    this.textSelection = null;
+    this.styleMenuOpen = false;
+  }
+
+  private deleteOnSelection(): void {
+    const ids = new Set(this.selectionMarkupIds());
+    if (ids.size === 0) return;
+    this.marks = this.marks.filter((mark) => !ids.has(mark.id));
+    if (this.selectedMarkId && ids.has(this.selectedMarkId)) this.selectedMarkId = null;
+    this.checkedCommentIds = this.checkedCommentIds.filter((id) => !ids.has(id));
+    this.textSelection = null;
+    this.styleMenuOpen = false;
+    void this.refreshMarkBoxes();
+  }
+
+  private freeTextEditor() {
+    const draft = this.noteDraft;
+    const box = this.freeTextBox;
+    if (!draft || draft.kind !== 'freetext' || draft.page !== this.currentPage || !box) return nothing;
+    return html`
+      <textarea
+        class="freetext-editor"
+        placeholder="Enter text here"
+        aria-label="Free text"
+        style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"
+        .value=${draft.text}
+        @input=${(event: Event) => {
+          if (!this.noteDraft || this.noteDraft.kind !== 'freetext') return;
+          this.noteDraft = { ...this.noteDraft, text: (event.target as HTMLTextAreaElement).value };
+        }}
+        @keydown=${(event: KeyboardEvent) => {
+          if (event.key !== 'Escape') return;
+          event.preventDefault();
+          event.stopPropagation();
+          this.cancelDraft();
+        }}
+      ></textarea>
+    `;
+  }
+
+  private quickSelectionUi() {
+    const selection = this.textSelection;
+    if (!selection || selection.page !== this.currentPage || selection.boxes.length === 0) return nothing;
+    const first = selection.boxes[0];
+    const last = selection.boxes[selection.boxes.length - 1];
+    const left = Math.min(...selection.boxes.map((box) => box.left));
+    const right = Math.max(...selection.boxes.map((box) => box.left + box.width));
+    const bottom = Math.max(...selection.boxes.map((box) => box.top + box.height));
+    const center = (left + right) / 2;
+    const canDelete = this.selectionMarkupIds().length > 0;
+    return html`
+      ${selection.boxes.map(
+        (box) => html`
+          <div class="text-select" style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"></div>
+        `,
+      )}
+      <span class="select-handle" style="left:${first.left - 4}px;top:${first.top + first.height / 2 - 4}px"></span>
+      <span class="select-handle" style="left:${last.left + last.width - 4}px;top:${last.top + last.height / 2 - 4}px"></span>
+      <div class="quick-bar" style="left:${center}px;top:${bottom + 10}px">
+        <button type="button" aria-label="Comment" @click=${() => this.commentOnSelection()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+            <path d="M6 7.2h12a1.5 1.5 0 0 1 1.5 1.5v6.2a1.5 1.5 0 0 1-1.5 1.5H11l-3.2 2.4v-2.4H6A1.5 1.5 0 0 1 4.5 14.9V8.7A1.5 1.5 0 0 1 6 7.2z"></path>
+          </svg>
+        </button>
+        <button
+          type="button"
+          aria-label="Style"
+          aria-pressed=${this.styleMenuOpen}
+          @click=${() => {
+            this.styleMenuOpen = !this.styleMenuOpen;
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+            <circle cx="9" cy="10" r="3.2"></circle>
+            <circle cx="15" cy="9" r="2.2"></circle>
+            <circle cx="14.5" cy="14.5" r="2.4"></circle>
+          </svg>
+        </button>
+        <button type="button" aria-label="Link" @click=${() => this.linkOnSelection()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+            <path d="M10 13.5a4 4 0 0 0 5.7.3l2-2a4 4 0 0 0-5.7-5.6l-1.1 1.1"></path>
+            <path d="M14 10.5a4 4 0 0 0-5.7-.3l-2 2a4 4 0 0 0 5.7 5.6l1.1-1.1"></path>
+          </svg>
+        </button>
+        <button type="button" aria-label="Delete" ?disabled=${!canDelete} @click=${() => this.deleteOnSelection()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
+            <path d="M8 8.5h8M9.5 8.5v-1h5v1M9.2 8.5l.5 9h4.6l.5-9"></path>
+          </svg>
+        </button>
+      </div>
+      ${this.styleMenuOpen
+        ? html`
+            <div class="quick-styles" style="left:${center}px;top:${bottom + 50}px">
+              <button type="button" @click=${() => this.applySelectionStyle('highlight')}>
+                <span class="style-swatch" style="background:#f9ab00"></span>
+                Highlight
+              </button>
+              <button type="button" @click=${() => this.applySelectionStyle('underline')}>
+                <span class="style-swatch" style="background:#e37400"></span>
+                Underline
+              </button>
+              <button type="button" @click=${() => this.applySelectionStyle('strike')}>
+                <span class="style-swatch" style="background:#d93025"></span>
+                Strikethrough
+              </button>
+            </div>
+          `
+        : nothing}
+    `;
+  }
+
+  private openText(kind: 'text' | 'initials', point: { x: number; y: number }): void {
     const pdf = this.pdf;
     const pageNumber = this.currentPage;
     if (!pdf) return;
@@ -2111,6 +4341,10 @@ export class PdfEditor extends LitElement {
         text: '',
         tip: null,
         rect: null,
+        quote: '',
+        rects: [],
+        author: '',
+        createdAt: 0,
       };
     });
   }
@@ -2134,6 +4368,10 @@ export class PdfEditor extends LitElement {
         text: '',
         tip,
         rect: null,
+        quote: '',
+        rects: [],
+        author: '',
+        createdAt: 0,
       };
     });
   }
@@ -2296,24 +4534,43 @@ export class PdfEditor extends LitElement {
     const text = draft.text.trim();
     if (!text) return;
     const anchor = { x: draft.pdfX, y: draft.pdfY, width: 0.01, height: 0.01 };
-    const mark =
-      draft.kind === 'callout' && draft.tip
-        ? this.makeMark('callout', draft.page, [anchor], text, [draft.tip, { x: draft.pdfX, y: draft.pdfY }])
-        : draft.kind === 'link' && draft.rect
-          ? this.makeMark('link', draft.page, [draft.rect], text)
-          : draft.kind === 'text'
-            ? this.makeMark('text', draft.page, [anchor], text)
-            : draft.kind === 'initials'
-              ? this.makeMark('initials', draft.page, [anchor], text)
-              : this.makeMark(draft.kind === 'freetext' ? 'freetext' : 'note', draft.page, [anchor], text);
+    let mark: Mark;
+    if (draft.kind === 'note') {
+      if (draft.rects.length === 0) {
+        this.cancelDraft();
+        return;
+      }
+      mark = this.makeMark('note', draft.page, draft.rects, text);
+      mark.quote = draft.quote;
+      mark.author = draft.author;
+      mark.createdAt = draft.createdAt;
+      mark.replies = [];
+    } else if (draft.kind === 'callout' && draft.tip) {
+      mark = this.makeMark('callout', draft.page, [anchor], text, [draft.tip, { x: draft.pdfX, y: draft.pdfY }]);
+    } else if (draft.kind === 'link' && draft.rect) {
+      mark = this.makeMark('link', draft.page, [draft.rect], text);
+    } else if (draft.kind === 'text') {
+      mark = this.makeMark('text', draft.page, [anchor], text);
+    } else if (draft.kind === 'initials') {
+      mark = this.makeMark('initials', draft.page, [anchor], text);
+    } else {
+      mark = this.makeMark('freetext', draft.page, [anchor], text);
+    }
     this.cancelDraft();
     this.marks = [...this.marks, mark];
     this.selectedMarkId = mark.id;
+    this.replyText = '';
+    this.commentsOpen = true;
     void this.refreshMarkBoxes();
   }
 
   private cancelDraft(): void {
+    this.selectionToken += 1;
     this.noteDraft = null;
+    this.notePreview = [];
+    this.freeTextBox = null;
+    this.textSelection = null;
+    this.styleMenuOpen = false;
     this.editDraft = null;
     this.formDraft = null;
     this.stampMenu = null;
@@ -2344,6 +4601,10 @@ export class PdfEditor extends LitElement {
         text: '',
         tip: null,
         rect,
+        quote: '',
+        rects: [],
+        author: '',
+        createdAt: 0,
       };
     });
   }
@@ -2422,6 +4683,13 @@ export class PdfEditor extends LitElement {
       sortY: Math.max(...tops),
       points,
       src,
+      quote: '',
+      author: this.authorName,
+      createdAt: Date.now(),
+      modifiedAt: Date.now(),
+      status: 'none',
+      marked: false,
+      replies: [],
     };
   }
 
@@ -2443,6 +4711,7 @@ export class PdfEditor extends LitElement {
     const boxes: MarkBox[] = [];
     for (const mark of this.marks) {
       if (mark.page !== pageNumber) continue;
+      if (this.appliedFilter.filterDocument && !this.matchesFilter(mark)) continue;
       const selected = mark.id === this.selectedMarkId;
       const label = mark.kind === 'note' ? String(noteNumbers.get(mark.id) ?? '') : '';
       if (mark.kind === 'pen' || mark.kind === 'signature' || mark.kind === 'callout' || mark.kind === 'freetext' || mark.kind === 'text' || mark.kind === 'stamp' || mark.kind === 'initials' || mark.kind === 'date' || mark.kind === 'line' || mark.kind === 'arrow' || mark.kind === 'polygon' || mark.kind === 'distance' || mark.kind === 'perimeter' || mark.kind === 'area') {
@@ -2477,11 +4746,24 @@ export class PdfEditor extends LitElement {
       }
     }
     this.markBoxes = boxes;
+    const draft = this.noteDraft;
+    if (draft?.kind === 'note' && draft.page === pageNumber && draft.rects.length > 0) {
+      this.notePreview = draft.rects.map((rect) => projectRect(viewport, rect));
+    } else if (this.notePreview.length > 0) {
+      this.notePreview = [];
+    }
+    if (this.textSelection?.page === pageNumber) {
+      this.textSelection = {
+        ...this.textSelection,
+        boxes: this.textSelection.rects.map((rect) => projectRect(viewport, rect)),
+      };
+    }
   }
 
   private focusMark(id: string): void {
     const mark = this.marks.find((item) => item.id === id);
     if (!mark) return;
+    if (this.selectedMarkId !== id) this.replyText = '';
     this.selectedMarkId = id;
     if (mark.page !== this.currentPage) this.goToPage(mark.page);
     else void this.refreshMarkBoxes();
@@ -2490,14 +4772,82 @@ export class PdfEditor extends LitElement {
   private deleteMark(id: string): void {
     this.marks = this.marks.filter((mark) => mark.id !== id);
     if (this.selectedMarkId === id) this.selectedMarkId = null;
+    if (this.editingCommentId === id) this.cancelEditComment();
+    this.checkedCommentIds = this.checkedCommentIds.filter((item) => item !== id);
+    this.closeCommentMenus();
     void this.refreshMarkBoxes();
+  }
+
+  private compareComments(left: Mark, right: Mark): number {
+    const position = left.page - right.page || right.sortY - left.sortY || left.id.localeCompare(right.id);
+    switch (this.sortBy) {
+      case 'created':
+        return right.createdAt - left.createdAt || position;
+      case 'modified':
+        return right.modifiedAt - left.modifiedAt || position;
+      case 'status':
+        return this.statusRank(left) - this.statusRank(right) || position;
+      case 'author':
+        return (left.author || 'Guest').localeCompare(right.author || 'Guest') || position;
+      case 'type':
+        return this.markLabel(left.kind).localeCompare(this.markLabel(right.kind)) || position;
+      case 'color':
+        return this.colorRank(left) - this.colorRank(right) || position;
+      default:
+        return position;
+    }
+  }
+
+  private statusRank(mark: Mark): number {
+    const order = ['accepted', 'rejected', 'cancelled', 'completed', 'none'];
+    const rank = order.indexOf(mark.status);
+    return (rank < 0 ? order.length : rank) * 2 + (mark.marked ? 0 : 1);
+  }
+
+  private colorRank(mark: Mark): number {
+    if (mark.status === 'accepted') return 0;
+    if (mark.status === 'completed') return 1;
+    if (mark.status === 'rejected') return 2;
+    if (mark.status === 'cancelled') return 3;
+    if (mark.marked) return 4;
+    switch (mark.kind) {
+      case 'highlight':
+        return 5;
+      case 'note':
+      case 'underline':
+        return 6;
+      case 'strike':
+        return 7;
+      case 'pen':
+      case 'signature':
+      case 'freetext':
+      case 'text':
+      case 'callout':
+      case 'stamp':
+      case 'initials':
+      case 'date':
+      case 'line':
+      case 'arrow':
+      case 'rect':
+      case 'ellipse':
+      case 'polygon':
+        return 8;
+      default:
+        return 9;
+    }
   }
 
   private get listedMarks(): Mark[] {
     const query = this.commentQuery.trim().toLowerCase();
-    const sorted = [...this.marks].sort((left, right) => left.page - right.page || right.sortY - left.sortY);
+    const sorted = [...this.marks].sort((left, right) => this.compareComments(left, right)).filter((mark) => this.matchesFilter(mark));
     if (!query) return sorted;
-    return sorted.filter((mark) => mark.text.toLowerCase().includes(query));
+    return sorted.filter((mark) => {
+      const status = COMMENT_STATUSES.find((item) => item.id === mark.status)?.label ?? '';
+      const haystack = [mark.text, mark.quote, mark.author, status, mark.marked ? 'marked' : '', ...mark.replies.map((reply) => reply.text)]
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(query);
+    });
   }
 
   private markLabel(kind: MarkKind): string {
@@ -2515,25 +4865,675 @@ export class PdfEditor extends LitElement {
     if (kind === 'text') return 'Text';
     if (kind === 'link') return 'Link URL';
     if (kind === 'initials') return 'Initials';
-    return 'Note text';
+    return 'Comment';
+  }
+
+  private get authorName(): string {
+    const name = this.author.trim();
+    return name || 'Guest';
+  }
+
+  private get selectedNote(): Mark | undefined {
+    return this.marks.find((mark) => mark.id === this.selectedMarkId && mark.kind === 'note');
+  }
+
+  private formatWhen(time: number): string {
+    if (!time) return '';
+    return new Date(time).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  }
+
+  private nameInitial(name: string): string {
+    const trimmed = name.trim();
+    return trimmed ? trimmed.charAt(0).toUpperCase() : 'G';
+  }
+
+  private commentAnchor(): CommentAnchor | null {
+    const drafting = this.noteDraft?.kind === 'note' && this.noteDraft.page === this.currentPage;
+    const boxes = drafting
+      ? this.notePreview
+      : this.selectedNote?.page === this.currentPage
+        ? this.markBoxes.filter((box) => box.id === this.selectedNote?.id)
+        : [];
+    if (boxes.length === 0) return null;
+    const last = boxes[boxes.length - 1];
+    const fromX = last.left + last.width;
+    const fromY = last.top + last.height / 2;
+    const pageWidth = this.canvasEl?.clientWidth ?? 0;
+    const pageHeight = this.canvasEl?.clientHeight ?? 0;
+    let left = fromX + 16;
+    let top = Math.max(8, boxes[0].top - 8);
+    if (pageWidth > 0 && left + COMMENT_POPUP_WIDTH > pageWidth - 8) {
+      left = Math.max(8, boxes[0].left - COMMENT_POPUP_WIDTH - 16);
+    }
+    if (pageHeight > 0) top = Math.min(top, Math.max(8, pageHeight - 160));
+    return { left, top, fromX, fromY };
+  }
+
+  private addReply(event: Event, markId: string): void {
+    event.preventDefault();
+    const text = this.replyText.trim();
+    if (!text) return;
+    const reply: NoteReply = {
+      id: `reply-${++this.markSeq}`,
+      author: this.authorName,
+      createdAt: Date.now(),
+      text,
+    };
+    this.marks = this.marks.map((mark) =>
+      mark.id === markId ? { ...mark, replies: [...mark.replies, reply], modifiedAt: Date.now() } : mark,
+    );
+    this.replyText = '';
+  }
+
+  private onReplyInput(event: Event): void {
+    this.replyText = (event.target as HTMLInputElement).value;
+  }
+
+  private personHeading(name: string, time: number, detail = '') {
+    return html`
+      <span class="comment-person">
+        <span class="avatar">${this.nameInitial(name)}</span>
+        <span>
+          <span class="person-name">${name}</span>
+          <span class="person-time">${this.formatWhen(time)}${detail}</span>
+        </span>
+      </span>
+    `;
+  }
+
+  private replyList(replies: NoteReply[]) {
+    if (replies.length === 0) return nothing;
+    return html`
+      <ul class="reply-list">
+        ${replies.map(
+          (reply) => html`
+            <li>
+              <span class="avatar small">${this.nameInitial(reply.author)}</span>
+              <div>
+                <span class="person-name">${reply.author}</span>
+                <span class="person-time">${this.formatWhen(reply.createdAt)}</span>
+                <p>${reply.text}</p>
+              </div>
+            </li>
+          `,
+        )}
+      </ul>
+    `;
+  }
+
+  private replyForm(markId: string) {
+    return html`
+      <form class="reply-form" @submit=${(event: Event) => this.addReply(event, markId)}>
+        <input
+          type="text"
+          placeholder="Add a reply"
+          aria-label="Add a reply"
+          .value=${this.replyText}
+          @input=${this.onReplyInput}
+        />
+        <button type="submit" ?disabled=${this.replyText.trim().length === 0}>Reply</button>
+      </form>
+    `;
+  }
+
+  private noteLink() {
+    const drafting = this.noteDraft?.kind === 'note' && this.noteDraft.page === this.currentPage;
+    const saved = !drafting && this.selectedNote?.page === this.currentPage;
+    if (!drafting && !saved) return nothing;
+    const anchor = this.commentAnchor();
+    if (!anchor) return nothing;
+    const toX = anchor.left >= anchor.fromX ? anchor.left : anchor.left + COMMENT_POPUP_WIDTH;
+    const toY = anchor.top + 28;
+    return svg`
+      <svg class="comment-link" aria-hidden="true">
+        <line
+          x1=${anchor.fromX}
+          y1=${anchor.fromY}
+          x2=${toX}
+          y2=${toY}
+          stroke="#c26401"
+          stroke-width="1.25"
+        ></line>
+      </svg>
+    `;
+  }
+
+  private noteComposer() {
+    const draft = this.noteDraft;
+    const anchor = this.commentAnchor();
+    if (!draft || draft.kind !== 'note' || draft.page !== this.currentPage || !anchor) return nothing;
+    return html`
+      <form
+        class="note-box comment-pop"
+        style="left:${anchor.left}px;top:${anchor.top}px"
+        @submit=${this.commitNote}
+      >
+        ${this.personHeading(draft.author, draft.createdAt)}
+        <blockquote class="comment-quote">${draft.quote}</blockquote>
+        <textarea
+          aria-label="Comment"
+          placeholder="Write a comment"
+          autofocus
+          .value=${draft.text}
+          @input=${(event: Event) => {
+            if (!this.noteDraft) return;
+            this.noteDraft = { ...this.noteDraft, text: (event.target as HTMLTextAreaElement).value };
+          }}
+        ></textarea>
+        <div class="note-actions">
+          <button type="button" @click=${() => this.cancelDraft()}>Cancel</button>
+          <button type="submit" ?disabled=${draft.text.trim().length === 0}>Save</button>
+        </div>
+      </form>
+    `;
+  }
+
+  private savedNotePopup() {
+    if (this.noteDraft?.kind === 'note') return nothing;
+    const mark = this.selectedNote;
+    const anchor = this.commentAnchor();
+    if (!mark || mark.page !== this.currentPage || !anchor) return nothing;
+    if (this.appliedFilter.filterDocument && !this.matchesFilter(mark)) return nothing;
+    const tone = mark.status !== 'none' ? `tone-${mark.status}` : '';
+    return html`
+      <div class="note-box comment-pop ${tone} ${mark.marked ? 'is-marked' : ''}" style="left:${anchor.left}px;top:${anchor.top}px">
+        ${this.personHeading(mark.author || 'Guest', mark.createdAt)}
+        ${this.commentChips(mark)}
+        ${mark.quote ? html`<blockquote class="comment-quote">${mark.quote}</blockquote>` : nothing}
+        <p class="comment-body">${mark.text}</p>
+        ${this.replyList(mark.replies)}
+        ${this.replyForm(mark.id)}
+      </div>
+    `;
+  }
+
+  private cloneFilter(filter: CommentFilterState): CommentFilterState {
+    return {
+      users: [...filter.users],
+      colors: [...filter.colors],
+      types: [...filter.types],
+      statuses: [...filter.statuses],
+      includeReplies: filter.includeReplies,
+      filterDocument: filter.filterDocument,
+    };
+  }
+
+  private filterCount(filter: CommentFilterState): number {
+    return filter.users.length + filter.colors.length + filter.types.length + filter.statuses.length;
+  }
+
+  private commentSwatch(mark: Mark): string {
+    if (mark.status === 'accepted') return '#1e8e3e';
+    if (mark.status === 'rejected') return '#d93025';
+    if (mark.status === 'cancelled') return '#80868b';
+    if (mark.status === 'completed') return '#1a73e8';
+    if (mark.marked) return '#e37400';
+    switch (mark.kind) {
+      case 'highlight':
+        return '#f9ab00';
+      case 'note':
+      case 'underline':
+        return '#e37400';
+      case 'strike':
+        return '#d93025';
+      case 'signature':
+      case 'distance':
+      case 'perimeter':
+      case 'area':
+      case 'link':
+        return '#1a73e8';
+      default:
+        return '#202124';
+    }
+  }
+
+  private matchesFilter(mark: Mark, filter = this.appliedFilter): boolean {
+    if (filter.users.length > 0) {
+      const names = [mark.author || 'Guest'];
+      if (filter.includeReplies) {
+        for (const reply of mark.replies) names.push(reply.author || 'Guest');
+      }
+      if (!names.some((name) => filter.users.includes(name))) return false;
+    }
+    if (filter.colors.length > 0 && !filter.colors.includes(this.commentSwatch(mark))) return false;
+    if (filter.types.length > 0 && !filter.types.includes(mark.kind)) return false;
+    if (filter.statuses.length > 0 && !filter.statuses.includes(mark.status)) return false;
+    return true;
+  }
+
+  private filterChoices(tab: FilterTab): Array<{ id: string; label: string; color: string }> {
+    if (tab === 'user') {
+      const names = new Set<string>();
+      for (const mark of this.marks) {
+        names.add(mark.author || 'Guest');
+        if (this.draftFilter.includeReplies) {
+          for (const reply of mark.replies) names.add(reply.author || 'Guest');
+        }
+      }
+      return [...names].sort((left, right) => left.localeCompare(right)).map((name) => ({ id: name, label: name, color: '' }));
+    }
+    if (tab === 'color') {
+      const colors = new Set<string>();
+      for (const mark of this.marks) colors.add(this.commentSwatch(mark));
+      return [...colors].sort().map((color) => ({ id: color, label: color, color }));
+    }
+    if (tab === 'type') {
+      const kinds = new Map<string, string>();
+      for (const mark of this.marks) kinds.set(mark.kind, this.markLabel(mark.kind));
+      return [...kinds.entries()]
+        .sort((left, right) => left[1].localeCompare(right[1]))
+        .map(([id, label]) => ({ id, label, color: '' }));
+    }
+    return COMMENT_STATUSES.map((item) => ({ id: item.id, label: item.label, color: item.color }));
+  }
+
+  private filterSelection(tab: FilterTab): string[] {
+    if (tab === 'user') return this.draftFilter.users;
+    if (tab === 'color') return this.draftFilter.colors;
+    if (tab === 'type') return this.draftFilter.types;
+    return this.draftFilter.statuses;
+  }
+
+  private toggleFilterChoice(tab: FilterTab, id: string): void {
+    const draft = this.cloneFilter(this.draftFilter);
+    const key = tab === 'user' ? 'users' : tab === 'color' ? 'colors' : tab === 'type' ? 'types' : 'statuses';
+    const current = draft[key];
+    draft[key] = current.includes(id) ? current.filter((item) => item !== id) : [...current, id];
+    this.draftFilter = draft;
+  }
+
+  private setIncludeReplies(includeReplies: boolean): void {
+    const draft = this.cloneFilter(this.draftFilter);
+    draft.includeReplies = includeReplies;
+    if (!includeReplies) {
+      const authors = new Set(this.marks.map((mark) => mark.author || 'Guest'));
+      draft.users = draft.users.filter((name) => authors.has(name));
+    }
+    this.draftFilter = draft;
+  }
+
+  private openFilter(): void {
+    this.closeCommentMenus();
+    this.draftFilter = this.cloneFilter(this.appliedFilter);
+    this.filterTab = 'user';
+    this.filterOpen = true;
+  }
+
+  private closeFilter(): void {
+    this.filterOpen = false;
+  }
+
+  private clearFilterDraft(): void {
+    this.draftFilter = {
+      ...emptyCommentFilter(),
+      includeReplies: this.draftFilter.includeReplies,
+      filterDocument: this.draftFilter.filterDocument,
+    };
+  }
+
+  private applyFilter(): void {
+    this.appliedFilter = this.cloneFilter(this.draftFilter);
+    this.filterOpen = false;
+    void this.refreshMarkBoxes();
+  }
+
+  private filterDialog() {
+    if (!this.filterOpen) return nothing;
+    const choices = this.filterChoices(this.filterTab);
+    const selected = this.filterSelection(this.filterTab);
+    const count = this.filterCount(this.draftFilter);
+    const tabs: FilterTab[] = ['user', 'color', 'type', 'status'];
+    return html`
+      <div class="filter-backdrop" @click=${this.closeFilter}>
+        <div
+          class="filter-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="filter-title"
+          @click=${(event: Event) => event.stopPropagation()}
+        >
+          <div class="filter-head">
+            <h2 id="filter-title">Filters${count > 0 ? ` (${count})` : ''}</h2>
+            <button class="filter-close" type="button" aria-label="Close filters" @click=${this.closeFilter}>×</button>
+          </div>
+          <div class="filter-tabs" role="tablist" aria-label="Filter by">
+            ${tabs.map(
+              (tab) => html`
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected=${this.filterTab === tab}
+                  @click=${() => {
+                    this.filterTab = tab;
+                  }}
+                >
+                  ${tab === 'user' ? 'User' : tab === 'color' ? 'Color' : tab === 'type' ? 'Type' : 'Status'}
+                </button>
+              `,
+            )}
+          </div>
+          <div class="filter-options" role="tabpanel">
+            ${choices.length === 0
+              ? html`<p class="filter-empty">No comments to filter yet.</p>`
+              : choices.map(
+                  (choice) => html`
+                    <label class="filter-option">
+                      <input
+                        type="checkbox"
+                        .checked=${selected.includes(choice.id)}
+                        aria-label=${this.filterTab === 'color' ? `Color ${choice.color}` : choice.label}
+                        @change=${() => this.toggleFilterChoice(this.filterTab, choice.id)}
+                      />
+                      ${choice.color ? html`<span class="filter-swatch" style="background:${choice.color}"></span>` : nothing}
+                      ${this.filterTab === 'color' ? nothing : choice.label}
+                    </label>
+                  `,
+                )}
+          </div>
+          <div class="filter-settings">
+            <h3>Filter settings</h3>
+            <label class="filter-option">
+              <input
+                type="checkbox"
+                .checked=${this.draftFilter.includeReplies}
+                @change=${(event: Event) => this.setIncludeReplies((event.target as HTMLInputElement).checked)}
+              />
+              Include replies
+            </label>
+            <label class="filter-option">
+              <input
+                type="checkbox"
+                .checked=${this.draftFilter.filterDocument}
+                @change=${(event: Event) => {
+                  this.draftFilter = { ...this.cloneFilter(this.draftFilter), filterDocument: (event.target as HTMLInputElement).checked };
+                }}
+              />
+              Filter document and comments panel
+            </label>
+          </div>
+          <div class="filter-foot">
+            <button class="text-btn" type="button" @click=${this.clearFilterDraft}>Clear all</button>
+            <button class="apply-btn" type="button" @click=${this.applyFilter}>Apply</button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private closeCommentMenus(): void {
+    this.commentMenuId = null;
+    this.statusMenuId = null;
+    this.menuAnchor = null;
+  }
+
+  private openCommentMenu(event: Event, kind: 'status' | 'actions', id: string): void {
+    const openId = kind === 'status' ? this.statusMenuId : this.commentMenuId;
+    if (openId === id) {
+      this.closeCommentMenus();
+      return;
+    }
+    const button = event.currentTarget;
+    if (!(button instanceof HTMLElement)) return;
+    const rect = button.getBoundingClientRect();
+    const menuWidth = kind === 'status' ? 196 : 148;
+    const menuHeight = kind === 'status' ? 292 : 88;
+    let left = Math.max(8, rect.right - menuWidth);
+    let top = rect.bottom + 6;
+    if (top + menuHeight > window.innerHeight - 8) top = Math.max(8, rect.top - menuHeight - 6);
+    this.menuAnchor = { top, left };
+    this.statusMenuId = kind === 'status' ? id : null;
+    this.commentMenuId = kind === 'actions' ? id : null;
+  }
+
+  private applyCommentAction(id: string, action: CommentAction): void {
+    const modifiedAt = Date.now();
+    this.marks = this.marks.map((mark) => {
+      if (mark.id !== id) return mark;
+      if (action === 'marked' || action === 'unmarked') return { ...mark, marked: action === 'marked', modifiedAt };
+      return { ...mark, status: action, modifiedAt };
+    });
+    this.closeCommentMenus();
+  }
+
+  private startEditComment(mark: Mark): void {
+    this.closeCommentMenus();
+    this.editingCommentId = mark.id;
+    this.editingCommentText = mark.text;
+    this.focusMark(mark.id);
+  }
+
+  private saveCommentEdit(event: Event): void {
+    event.preventDefault();
+    const id = this.editingCommentId;
+    const text = this.editingCommentText.trim();
+    if (!id || !text) return;
+    this.marks = this.marks.map((mark) => (mark.id === id ? { ...mark, text, modifiedAt: Date.now() } : mark));
+    this.editingCommentId = null;
+    this.editingCommentText = '';
+  }
+
+  private cancelEditComment(): void {
+    this.editingCommentId = null;
+    this.editingCommentText = '';
+  }
+
+  private toggleSelecting(): void {
+    this.selectingComments = !this.selectingComments;
+    this.checkedCommentIds = [];
+    this.closeCommentMenus();
+  }
+
+  private toggleChecked(id: string): void {
+    this.checkedCommentIds = this.checkedCommentIds.includes(id)
+      ? this.checkedCommentIds.filter((item) => item !== id)
+      : [...this.checkedCommentIds, id];
+  }
+
+  private toggleCheckAll(): void {
+    const ids = this.listedMarks.map((mark) => mark.id);
+    const allChecked = ids.length > 0 && ids.every((id) => this.checkedCommentIds.includes(id));
+    this.checkedCommentIds = allChecked ? this.checkedCommentIds.filter((id) => !ids.includes(id)) : [...new Set([...this.checkedCommentIds, ...ids])];
+  }
+
+  private deleteChecked(): void {
+    const ids = new Set(this.checkedCommentIds);
+    if (ids.size === 0) return;
+    this.marks = this.marks.filter((mark) => !ids.has(mark.id));
+    if (this.selectedMarkId && ids.has(this.selectedMarkId)) this.selectedMarkId = null;
+    if (this.editingCommentId && ids.has(this.editingCommentId)) this.cancelEditComment();
+    this.checkedCommentIds = [];
+    this.closeCommentMenus();
+    void this.refreshMarkBoxes();
+  }
+
+  private onSortChange(event: Event): void {
+    const value = (event.target as HTMLSelectElement).value;
+    if (
+      value === 'position' ||
+      value === 'created' ||
+      value === 'modified' ||
+      value === 'status' ||
+      value === 'author' ||
+      value === 'type' ||
+      value === 'color'
+    ) {
+      this.sortBy = value;
+    }
+  }
+
+  private syncSelectAll(): void {
+    const box = this.renderRoot.querySelector('.select-all');
+    if (!(box instanceof HTMLInputElement)) return;
+    const ids = this.listedMarks.map((mark) => mark.id);
+    const count = ids.filter((id) => this.checkedCommentIds.includes(id)).length;
+    box.indeterminate = count > 0 && count < ids.length;
+  }
+
+  private statusColor(mark: Mark): string {
+    if (mark.status === 'accepted') return '#1e8e3e';
+    if (mark.status === 'rejected') return '#d93025';
+    if (mark.status === 'cancelled') return '#80868b';
+    if (mark.status === 'completed') return '#1a73e8';
+    if (mark.marked) return '#e37400';
+    return '#dadce0';
+  }
+
+  private commentChips(mark: Mark) {
+    const status = COMMENT_STATUSES.find((item) => item.id === mark.status);
+    if ((!status || status.id === 'none') && !mark.marked) return nothing;
+    return html`
+      <span class="chip-row">
+        ${status && status.id !== 'none' ? html`<span class="status-chip tone-${status.id}">${status.label}</span>` : nothing}
+        ${mark.marked ? html`<span class="status-chip tone-marked">Marked</span>` : nothing}
+      </span>
+    `;
+  }
+
+  private commentCard(mark: Mark) {
+    const selected = mark.id === this.selectedMarkId;
+    const editing = this.editingCommentId === mark.id;
+    const note = mark.kind === 'note';
+    const tone = mark.status !== 'none' ? `tone-${mark.status}` : '';
+    return html`
+      <article class="comment-card ${selected ? 'selected' : ''} ${tone} ${mark.marked ? 'is-marked' : ''}">
+        ${this.selectingComments
+          ? html`
+              <label class="comment-check">
+                <input
+                  type="checkbox"
+                  .checked=${this.checkedCommentIds.includes(mark.id)}
+                  aria-label=${`Select comment ${mark.text || this.markLabel(mark.kind)}`}
+                  @change=${() => this.toggleChecked(mark.id)}
+                />
+              </label>
+            `
+          : nothing}
+        <div class="comment-main">
+          <div class="comment-top">
+            <button class="comment" type="button" @click=${() => this.focusMark(mark.id)}>
+              ${note
+                ? this.personHeading(mark.author || 'Guest', mark.createdAt, ` · Page ${mark.page}`)
+                : html`
+                    <span class="comment-kind">${this.markLabel(mark.kind)}</span>
+                    <span class="comment-page">Page ${mark.page}${mark.author ? ` · ${mark.author}` : ''}</span>
+                  `}
+              ${note && mark.quote ? html`<span class="comment-quote">${mark.quote}</span>` : nothing}
+              ${editing ? nothing : html`<span class=${note ? 'comment-body' : 'comment-text'}>${mark.text}</span>`}
+            </button>
+            <div class="comment-tools">
+              <button
+                class="comment-menu-btn"
+                type="button"
+                aria-label="Set comment status"
+                aria-haspopup="menu"
+                aria-expanded=${this.statusMenuId === mark.id}
+                @click=${(event: Event) => this.openCommentMenu(event, 'status', mark.id)}
+              >
+                <span class="status-dot" style="background:${this.statusColor(mark)}"></span>
+              </button>
+              <button
+                class="comment-menu-btn"
+                type="button"
+                aria-label="Comment actions"
+                aria-haspopup="menu"
+                aria-expanded=${this.commentMenuId === mark.id}
+                @click=${(event: Event) => this.openCommentMenu(event, 'actions', mark.id)}
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor">
+                  <circle cx="12" cy="6" r="1.5"></circle>
+                  <circle cx="12" cy="12" r="1.5"></circle>
+                  <circle cx="12" cy="18" r="1.5"></circle>
+                </svg>
+              </button>
+            </div>
+          </div>
+          ${this.commentChips(mark)}
+          ${editing
+            ? html`
+                <form class="comment-edit" @submit=${this.saveCommentEdit}>
+                  <textarea
+                    aria-label="Edit comment"
+                    .value=${this.editingCommentText}
+                    @input=${(event: Event) => {
+                      this.editingCommentText = (event.target as HTMLTextAreaElement).value;
+                    }}
+                  ></textarea>
+                  <div class="note-actions">
+                    <button type="button" @click=${this.cancelEditComment}>Cancel</button>
+                    <button type="submit" ?disabled=${this.editingCommentText.trim().length === 0}>Save</button>
+                  </div>
+                </form>
+              `
+            : nothing}
+          ${note && !editing
+            ? selected
+              ? html`${this.replyList(mark.replies)} ${this.replyForm(mark.id)}`
+              : mark.replies.length > 0
+                ? html`<span class="reply-count">${mark.replies.length === 1 ? '1 reply' : `${mark.replies.length} replies`}</span>`
+                : nothing
+            : nothing}
+        </div>
+      </article>
+    `;
+  }
+
+  private statusMenu() {
+    const mark = this.marks.find((item) => item.id === this.statusMenuId);
+    const anchor = this.menuAnchor;
+    if (!mark || !anchor) return nothing;
+    return html`
+      <div class="comment-menu" role="menu" style="top:${anchor.top}px;left:${anchor.left}px">
+        ${COMMENT_STATUSES.map(
+          (item) => html`
+            <button
+              type="button"
+              role="menuitemradio"
+              aria-checked=${mark.status === item.id}
+              @click=${() => this.applyCommentAction(mark.id, item.id)}
+            >
+              <span class="swatch" style="background:${item.color}"></span>
+              <span>${item.label}</span>
+            </button>
+          `,
+        )}
+        <hr class="menu-rule" />
+        <button type="button" role="menuitemcheckbox" aria-checked=${mark.marked} @click=${() => this.applyCommentAction(mark.id, 'marked')}>
+          <span class="swatch marked"></span>
+          <span>Marked</span>
+        </button>
+        <button
+          type="button"
+          role="menuitemcheckbox"
+          aria-checked=${!mark.marked}
+          @click=${() => this.applyCommentAction(mark.id, 'unmarked')}
+        >
+          <span class="swatch" style="background:#fff"></span>
+          <span>Unmarked</span>
+        </button>
+      </div>
+    `;
+  }
+
+  private actionMenu() {
+    const mark = this.marks.find((item) => item.id === this.commentMenuId);
+    const anchor = this.menuAnchor;
+    if (!mark || !anchor) return nothing;
+    return html`
+      <div class="comment-menu" role="menu" style="top:${anchor.top}px;left:${anchor.left}px">
+        <button type="button" role="menuitem" @click=${() => this.startEditComment(mark)}>Edit</button>
+        <button type="button" role="menuitem" class="danger" @click=${() => this.deleteMark(mark.id)}>Delete</button>
+      </div>
+    `;
   }
 
   private markFace(box: MarkBox) {
     if (box.kind === 'pen' || box.kind === 'signature' || box.kind === 'line' || box.kind === 'arrow' || box.kind === 'rect' || box.kind === 'ellipse' || box.kind === 'polygon') {
       return nothing;
-    }
-    if (box.kind === 'note') {
-      return html`
-        <button
-          class="note-pin ${box.selected ? 'selected' : ''}"
-          type="button"
-          data-mark=${box.id}
-          aria-label=${`Note ${box.label}`}
-          style="left:${box.left}px;top:${box.top - 22}px"
-        >
-          ${box.label}
-        </button>
-      `;
     }
     if (box.kind === 'freetext' || box.kind === 'callout' || box.kind === 'text' || box.kind === 'stamp' || box.kind === 'distance' || box.kind === 'perimeter' || box.kind === 'area' || box.kind === 'initials' || box.kind === 'date') {
       const fontSize = box.kind === 'initials' ? 18 : 12;
@@ -2752,10 +5752,10 @@ export class PdfEditor extends LitElement {
   }
 
   override render() {
-    const pageLabel = this.totalPages > 0 ? `Page ${this.currentPage} of ${this.totalPages}` : 'No document';
+    if (this.isReadOnlyPreview()) return this.wordView();
     return html`
       <div
-        class="root"
+        class="root ${this.previewTheme === 'dark' ? 'preview-dark' : ''}"
         @dragenter=${this.onDragEnter}
         @dragover=${this.onDragOver}
         @dragleave=${this.onDragLeave}
@@ -2780,27 +5780,29 @@ export class PdfEditor extends LitElement {
               </button>
               ${this.menuOpen
                 ? html`
-                    <div class="popup" role="menu">
-                      <button type="button" role="menuitem" @click=${() => this.chooseFile()}>Open…</button>
-                      <div class="rule"></div>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        ?disabled=${!this.pdf || this.currentPage <= 1}
-                        @click=${() => this.goToPage(this.currentPage - 1)}
-                      >
-                        Previous page
+                    <div class="popup file-menu" role="menu">
+                      <button type="button" role="menuitem" @click=${() => this.chooseFile()}>
+                        <span class="menu-item">${iconOpen}<span>Open</span></span>
                       </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        ?disabled=${!this.pdf || this.currentPage >= this.totalPages}
-                        @click=${() => this.goToPage(this.currentPage + 1)}
-                      >
-                        Next page
+                      <button type="button" role="menuitem" ?disabled=${!this.fileReady} @click=${() => this.downloadPdf()}>
+                        <span class="menu-item">${iconPreviewDownload()}<span>Download</span></span>
+                      </button>
+                      <button type="button" role="menuitem" @click=${() => this.toggleWordFullScreen()}>
+                        <span class="menu-item">
+                          ${this.wordFullScreen ? iconExitFullScreen() : iconEnterFullScreen()}
+                          <span>${this.wordFullScreen ? 'Exit Full Screen' : 'Enter Full Screen'}</span>
+                        </span>
+                      </button>
+                      <button type="button" role="menuitem" ?disabled=${!this.fileReady} @click=${() => void this.savePdfAs()}>
+                        <span class="menu-item">${iconSave}<span>Save As</span></span>
+                      </button>
+                      <button type="button" role="menuitem" ?disabled=${!this.fileReady} @click=${() => void this.printPdf()}>
+                        <span class="menu-item">${iconPreviewPrint()}<span>Print</span></span>
                       </button>
                       <div class="rule"></div>
-                      <div class="menu-label">${pageLabel}</div>
+                      <button type="button" role="menuitem" @click=${() => this.openPreviewSettings()}>
+                        <span class="menu-item">${iconPreviewSettings()}<span>Settings</span></span>
+                      </button>
                     </div>
                   `
                 : null}
@@ -3136,7 +6138,7 @@ export class PdfEditor extends LitElement {
         <div class="workspace">
           ${this.pagesPanel}
           <div
-            class="viewer ${this.tool === 'hand' ? 'hand' : ''} ${this.panning ? 'panning' : ''} ${this.canDraw ? 'markup' : ''}"
+            class="viewer ${this.tool === 'hand' ? 'hand' : ''} ${this.panning ? 'panning' : ''} ${this.canDraw ? 'markup' : ''} ${this.markupKind === 'note' ? 'note-tool' : ''} ${!this.canDraw && this.tool === 'select' && !this.editText ? 'select-text' : ''}"
             tabindex="0"
             @pointerdown=${this.onPointerDown}
             @pointermove=${this.onPointerMove}
@@ -3158,6 +6160,14 @@ export class PdfEditor extends LitElement {
                       `
                     : null}
                 </div>
+                ${this.notePreview.map(
+                  (box) => html`
+                    <div
+                      class="mark note pending"
+                      style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"
+                    ></div>
+                  `,
+                )}
                 ${this.canEditText
                   ? html`
                       <div class="text-layer">
@@ -3203,7 +6213,12 @@ export class PdfEditor extends LitElement {
                     `,
                   )}
                 </div>
-                ${this.noteDraft && this.noteDraft.page === this.currentPage
+                ${this.noteLink()}
+                ${this.noteComposer()}
+                ${this.savedNotePopup()}
+                ${this.freeTextEditor()}
+                ${this.quickSelectionUi()}
+                ${this.noteDraft && this.noteDraft.kind !== 'note' && this.noteDraft.kind !== 'freetext' && this.noteDraft.page === this.currentPage
                   ? html`
                       <form
                         class="note-box"
@@ -3281,10 +6296,10 @@ export class PdfEditor extends LitElement {
               ? null
               : html`
                   <div class="status ${this.errorMessage ? 'error' : ''}">
-                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF to start viewing.')}
+                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF, Word document, or image to start viewing.')}
                   </div>
                 `}
-            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF to open it</div>` : null}
+            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, or image</div>` : null}
           </div>
           ${this.commentsOpen
             ? html`
@@ -3304,20 +6319,55 @@ export class PdfEditor extends LitElement {
                   <h2>Comments (${this.marks.length})</h2>
                   <div class="sort-row">
                     <span>Sort:</span>
-                    <select
-                      aria-label="Sort comments"
-                      .value=${this.sortBy}
-                      @change=${(event: Event) => {
-                        this.sortBy = (event.target as HTMLSelectElement).value;
-                      }}
-                    >
+                    <select aria-label="Sort comments" .value=${this.sortBy} @change=${this.onSortChange}>
                       <option value="position">Position</option>
+                      <option value="created">Created Date</option>
+                      <option value="modified">Modified Date</option>
+                      <option value="status">Status</option>
+                      <option value="author">Author</option>
+                      <option value="type">Type</option>
+                      <option value="color">Color</option>
                     </select>
                     <div class="sort-actions">
+                      <button
+                        class="icon"
+                        type="button"
+                        aria-label="Select comments"
+                        aria-pressed=${this.selectingComments}
+                        @click=${this.toggleSelecting}
+                      >
+                        ${iconMultiSelect}
+                      </button>
                       <button class="icon" type="button" aria-label="Comment list options">${iconOpen}</button>
-                      <button class="icon" type="button" aria-label="Filter comments">${iconFilter}</button>
+                      <button
+                        class="icon"
+                        type="button"
+                        aria-label="Filter comments"
+                        aria-pressed=${this.filterCount(this.appliedFilter) > 0}
+                        @click=${this.openFilter}
+                      >
+                        ${iconFilter}
+                      </button>
                     </div>
                   </div>
+                  ${this.selectingComments && this.marks.length > 0
+                    ? html`
+                        <div class="select-bar">
+                          <label>
+                            <input
+                              class="select-all"
+                              type="checkbox"
+                              .checked=${this.listedMarks.length > 0 && this.listedMarks.every((mark) => this.checkedCommentIds.includes(mark.id))}
+                              aria-label="Select all comments"
+                              @change=${this.toggleCheckAll}
+                            />
+                            All
+                          </label>
+                          <span>${this.checkedCommentIds.length} selected</span>
+                          <button type="button" ?disabled=${this.checkedCommentIds.length === 0} @click=${this.deleteChecked}>Delete</button>
+                        </div>
+                      `
+                    : nothing}
                   ${this.marks.length === 0
                     ? html`
                         <div class="empty">
@@ -3326,45 +6376,27 @@ export class PdfEditor extends LitElement {
                         </div>
                       `
                     : html`
-                        <div class="comment-list">
+                        <div class="comment-list" @scroll=${this.closeCommentMenus}>
                           ${this.listedMarks.length === 0
-                            ? html`<div class="empty"><span>No comments match that search.</span></div>`
-                            : this.listedMarks.map(
-                                (mark) => html`
-                                  <div class="comment-row ${mark.id === this.selectedMarkId ? 'selected' : ''}">
-                                    <button class="comment" type="button" @click=${() => this.focusMark(mark.id)}>
-                                      <span class="comment-kind">${this.markLabel(mark.kind)}</span>
-                                      <span class="comment-page">Page ${mark.page}</span>
-                                      <span class="comment-text">${mark.text}</span>
-                                    </button>
-                                    ${mark.id === this.selectedMarkId
-                                      ? html`
-                                          <button
-                                            class="comment-delete"
-                                            type="button"
-                                            aria-label="Delete comment"
-                                            @click=${() => this.deleteMark(mark.id)}
-                                          >
-                                            Delete
-                                          </button>
-                                        `
-                                      : null}
-                                  </div>
-                                `,
-                              )}
+                            ? html`<div class="empty"><span>${this.commentQuery.trim() ? 'No comments match that search.' : 'No comments match the filter.'}</span></div>`
+                            : this.listedMarks.map((mark) => this.commentCard(mark))}
                         </div>
                       `}
+                  ${this.statusMenu()}
+                  ${this.actionMenu()}
                 </aside>
               `
             : null}
         </div>
-        <input class="file-input" type="file" accept="application/pdf,.pdf" @change=${this.onFileChosen} />
+        <input class="file-input" type="file" accept=${OPEN_ACCEPT} @change=${this.onFileChosen} />
         <input
           class="image-input file-input"
           type="file"
           accept="image/png,image/jpeg,image/gif,image/webp"
           @change=${this.onImageChosen}
         />
+        ${this.settingsDialog()}
+        ${this.filterDialog()}
       </div>
     `;
   }
