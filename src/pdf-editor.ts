@@ -365,6 +365,22 @@ interface PreviewSavePicker {
   }>;
 }
 
+type SettingsSection = 'theme' | 'shortcuts' | 'advanced';
+
+const SETTINGS_SHORTCUTS: ReadonlyArray<{ keys: string; description: string; scope: 'all' | 'pdf' | 'preview' }> = [
+  { keys: 'Ctrl + O', description: 'Open a file', scope: 'all' },
+  { keys: 'Ctrl + S', description: 'Save the PDF', scope: 'pdf' },
+  { keys: 'Ctrl + S', description: 'Download this file', scope: 'preview' },
+  { keys: 'Ctrl + P', description: 'Print', scope: 'all' },
+  { keys: 'Ctrl + F', description: 'Find in the document', scope: 'pdf' },
+  { keys: 'Ctrl + C', description: 'Copy the selected text', scope: 'pdf' },
+  { keys: 'Ctrl + +', description: 'Zoom in', scope: 'all' },
+  { keys: 'Ctrl + -', description: 'Zoom out', scope: 'all' },
+  { keys: 'Ctrl + 0', description: 'Zoom to 100%', scope: 'all' },
+  { keys: 'Left / Right', description: 'Go to the previous or next page', scope: 'all' },
+  { keys: 'Escape', description: 'Close a menu, dialog, or draft', scope: 'all' },
+];
+
 @customElement('pdf-editor')
 export class PdfEditor extends LitElement {
   static override styles = css`
@@ -578,7 +594,8 @@ export class PdfEditor extends LitElement {
       background: transparent;
       cursor: pointer;
     }
-    .field-target:hover, .field-target:focus-visible {
+    .field-target:hover, .field-target:focus-visible,
+    .field-target.highlighted {
       outline: 1px solid #1a73e8;
       background: rgba(26, 115, 232, 0.12);
     }
@@ -1821,6 +1838,183 @@ export class PdfEditor extends LitElement {
       background: rgba(32, 33, 36, 0.32);
     }
 
+    .settings-shell {
+      width: min(760px, 100%);
+      height: min(540px, 100%);
+      display: flex;
+      flex-direction: column;
+      background: #fff;
+      color: #202124;
+      border-radius: 14px;
+      box-shadow: 0 18px 50px rgba(32, 33, 36, 0.28);
+      overflow: hidden;
+    }
+    .settings-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-bottom: 1px solid #e8eaed;
+    }
+    .settings-head h2 { margin: 0; font-size: 18px; font-weight: 650; color: #202124; }
+    .settings-close {
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #5f6368;
+      font-size: 22px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .settings-close:hover { background: #f1f3f4; color: #202124; }
+    .settings-search { padding: 12px 16px 0; }
+    .settings-search input {
+      width: 100%;
+      height: 36px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      padding: 0 12px;
+      color: #202124;
+      font-size: 14px;
+    }
+    .settings-search input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px #d2e3fc;
+    }
+    .settings-body { flex: 1; min-height: 0; display: flex; }
+    .settings-nav {
+      width: 176px;
+      flex: none;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      border-right: 1px solid #e8eaed;
+    }
+    .settings-nav button {
+      height: 36px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #3c4043;
+      padding: 0 10px;
+      text-align: left;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .settings-nav button:hover { background: #f4f6f8; }
+    .settings-nav button[aria-current='true'] { background: #e8f0fe; color: #1a73e8; font-weight: 650; }
+    .settings-pane { flex: 1; min-width: 0; overflow: auto; padding: 16px 18px 20px; }
+    .settings-pane h3 { margin: 0 0 6px; font-size: 15px; }
+    .settings-note { margin: 0 0 14px; color: #5f6368; font-size: 13px; line-height: 1.4; }
+    .settings-empty { margin: 24px 0; color: #80868b; font-size: 14px; }
+    .theme-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+    .theme-card {
+      width: 100%;
+      padding: 0;
+      border: 1px solid #dadce0;
+      border-radius: 12px;
+      background: #fff;
+      overflow: hidden;
+      cursor: pointer;
+      text-align: left;
+      color: inherit;
+    }
+    .theme-card:hover { border-color: #8ab4f8; }
+    .theme-card[aria-pressed='true'] { border-color: #1a73e8; box-shadow: 0 0 0 1px #1a73e8; }
+    .theme-preview { height: 96px; display: flex; flex-direction: column; }
+    .theme-preview.light { background: #eef1f4; }
+    .theme-preview.dark { background: #202124; }
+    .theme-chrome { height: 16px; display: flex; align-items: center; gap: 4px; padding: 0 8px; }
+    .theme-chrome i { width: 6px; height: 6px; border-radius: 50%; background: #c4c7cc; display: block; }
+    .theme-preview.dark .theme-chrome i { background: #5f6368; }
+    .theme-body { flex: 1; display: flex; min-height: 0; }
+    .theme-side { width: 36%; }
+    .theme-preview.light .theme-side { background: #fff; border-right: 1px solid #e4e7eb; }
+    .theme-preview.dark .theme-side { background: #303134; }
+    .theme-main { flex: 1; margin: 8px; border-radius: 4px; }
+    .theme-preview.light .theme-main { background: #fff; }
+    .theme-preview.dark .theme-main { background: #3c4043; }
+    .theme-caption { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 13px; font-weight: 600; }
+    .theme-radio {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 2px solid #5f6368;
+      box-sizing: border-box;
+    }
+    .theme-card[aria-pressed='true'] .theme-radio { border-color: #1a73e8; box-shadow: inset 0 0 0 3px #fff, inset 0 0 0 7px #1a73e8; }
+    .shortcut-table { width: 100%; border-collapse: collapse; }
+    .shortcut-table th {
+      text-align: left;
+      padding: 8px 10px;
+      color: #5f6368;
+      font-size: 12px;
+      font-weight: 650;
+      border-bottom: 1px solid #e8eaed;
+    }
+    .shortcut-table td { padding: 10px; font-size: 13px; border-bottom: 1px solid #f1f3f4; vertical-align: middle; }
+    .shortcut-keys { font-weight: 650; white-space: nowrap; }
+    .adv-row {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .adv-row h3 { margin: 0 0 4px; font-size: 14px; }
+    .adv-row p { margin: 0; max-width: 420px; color: #5f6368; font-size: 12px; line-height: 1.45; }
+    .switch { position: relative; width: 40px; height: 22px; flex: none; }
+    .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+    .switch span {
+      position: absolute;
+      inset: 0;
+      border-radius: 11px;
+      background: #dadce0;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    .switch span::after {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 1px 2px rgba(32, 33, 36, 0.28);
+      transition: transform 0.15s ease;
+    }
+    .switch input:checked + span { background: #1a73e8; }
+    .switch input:checked + span::after { transform: translateX(18px); }
+    .switch input:focus-visible + span { box-shadow: 0 0 0 2px #d2e3fc; }
+    .preview-dark .settings-shell { background: #292a2d; color: #e8eaed; }
+    .preview-dark .settings-head,
+    .preview-dark .settings-nav { border-color: #3c4043; }
+    .preview-dark .settings-head h2,
+    .preview-dark .settings-nav button,
+    .preview-dark .shortcut-table td,
+    .preview-dark .adv-row h3,
+    .preview-dark .theme-caption { color: #e8eaed; }
+    .preview-dark .settings-close { color: #e8eaed; }
+    .preview-dark .settings-close:hover,
+    .preview-dark .settings-nav button:hover { background: #3c4043; }
+    .preview-dark .settings-nav button[aria-current='true'] { background: #394457; color: #8ab4f8; }
+    .preview-dark .settings-search input { background: #202124; border-color: #3c4043; color: #e8eaed; }
+    .preview-dark .settings-note,
+    .preview-dark .adv-row p,
+    .preview-dark .shortcut-table th { color: #9aa0a6; }
+    .preview-dark .shortcut-table td,
+    .preview-dark .adv-row { border-bottom-color: #3c4043; }
+    .preview-dark .theme-card { background: #202124; border-color: #3c4043; }
+    .preview-dark .theme-card[aria-pressed='true'] { border-color: #8ab4f8; box-shadow: 0 0 0 1px #8ab4f8; }
+
     .word-dialog {
       width: min(300px, 100%);
       background: #fff;
@@ -1975,6 +2169,11 @@ export class PdfEditor extends LitElement {
   @state() private wordMenuOpen = false;
   @state() private wordFullScreen = false;
   @state() private previewSettingsOpen = false;
+  @state() private settingsSection: SettingsSection = 'theme';
+  @state() private settingsQuery = '';
+  @state() private askBeforeLinks = true;
+  @state() private showSelectionTools = true;
+  @state() private highlightFormFields = true;
   @state() private previewTheme: 'light' | 'dark' = 'light';
   @state() private menuOpen = false;
   @state() private zoomOpen = false;
@@ -2770,11 +2969,89 @@ export class PdfEditor extends LitElement {
     if (stage instanceof HTMLElement) stage.focus({ preventScroll: true });
   }
 
+  private stepPreviewZoom(direction: 1 | -1): void {
+    const current = this.wordFit === 'percent' ? this.wordPercent : this.wordScaleLabel / 100;
+    const steps = [...WORD_ZOOM_LEVELS].sort((left, right) => left - right);
+    const next =
+      direction > 0
+        ? (steps.find((step) => step > current + 0.02) ?? steps[steps.length - 1])
+        : ([...steps].reverse().find((step) => step < current - 0.02) ?? steps[0]);
+    this.wordFit = 'percent';
+    this.wordPercent = next;
+  }
+
+  private handleChord(event: KeyboardEvent): boolean {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
+    if (this.previewSettingsOpen || this.wordZoomOpen || this.linkConfirmId) return false;
+    const target = event.composedPath()[0];
+    if (target instanceof HTMLElement && target.closest('input, textarea, select')) return false;
+    const key = event.key.toLowerCase();
+    if (key === 'o') {
+      event.preventDefault();
+      this.chooseFile();
+      return true;
+    }
+    if (key === 'p') {
+      event.preventDefault();
+      if (this.isReadOnlyPreview()) this.printPreview();
+      else if (this.fileReady) void this.printPdf();
+      return true;
+    }
+    if (key === 's') {
+      event.preventDefault();
+      if (this.isReadOnlyPreview()) this.downloadOriginal();
+      else if (this.fileReady) void this.save();
+      return true;
+    }
+    if (key === 'f' && !this.isReadOnlyPreview()) {
+      event.preventDefault();
+      this.menuOpen = false;
+      this.zoomOpen = false;
+      this.searchOpen = true;
+      void this.updateComplete.then(() => {
+        const input = this.renderRoot.querySelector('.search-pop input');
+        if (input instanceof HTMLInputElement) input.focus();
+      });
+      return true;
+    }
+    if (key === '=' || key === '+' || key === 'add') {
+      event.preventDefault();
+      if (this.isReadOnlyPreview()) this.stepPreviewZoom(1);
+      else this.stepZoom(1);
+      return true;
+    }
+    if (key === '-' || key === '_' || key === 'subtract') {
+      event.preventDefault();
+      if (this.isReadOnlyPreview()) this.stepPreviewZoom(-1);
+      else this.stepZoom(-1);
+      return true;
+    }
+    if (key === '0') {
+      event.preventDefault();
+      if (this.isReadOnlyPreview()) {
+        this.wordFit = 'percent';
+        this.wordPercent = 1;
+      } else this.setPercent(1);
+      return true;
+    }
+    if (key === 'c' && !this.isReadOnlyPreview()) {
+      const quote = this.textSelection?.quote.trim();
+      if (!quote) return false;
+      event.preventDefault();
+      void navigator.clipboard.writeText(quote);
+      return true;
+    }
+    return false;
+  }
+
   private onWordKeydown(event: KeyboardEvent): void {
     if (this.previewSettingsOpen || this.wordZoomOpen) {
       if (event.key === 'Escape') {
-        this.previewSettingsOpen = false;
-        this.wordZoomOpen = false;
+        if (this.settingsQuery) this.settingsQuery = '';
+        else {
+          this.previewSettingsOpen = false;
+          this.wordZoomOpen = false;
+        }
         event.preventDefault();
       }
       return;
@@ -2793,6 +3070,7 @@ export class PdfEditor extends LitElement {
     }
     const target = event.composedPath()[0];
     if (target instanceof HTMLElement && target.closest('input, textarea, select')) return;
+    if (this.handleChord(event)) return;
     if (event.key === 'ArrowLeft' || event.key === 'ArrowUp' || event.key === 'PageUp') {
       this.wordGo(-1);
       event.preventDefault();
@@ -2812,8 +3090,166 @@ export class PdfEditor extends LitElement {
     return this.pdf !== null && !this.saving;
   }
 
+  private shortcutRows() {
+    const preview = this.isReadOnlyPreview();
+    return SETTINGS_SHORTCUTS.filter((item) => item.scope === 'all' || (preview ? item.scope === 'preview' : item.scope === 'pdf'));
+  }
+
+  private listedShortcuts() {
+    const rows = this.shortcutRows();
+    const query = this.settingsQuery.trim().toLowerCase();
+    if (!query) return rows;
+    const matched = rows.filter((row) => `${row.keys} ${row.description}`.toLowerCase().includes(query));
+    if (matched.length > 0) return matched;
+    return 'shortcuts keyboard'.includes(query) ? rows : matched;
+  }
+
+  private advancedOptions() {
+    const rows = [
+      {
+        title: 'Ask before opening links',
+        detail: 'Show a confirmation before a link opens a new tab or moves to another page.',
+        checked: this.askBeforeLinks,
+        change: (checked: boolean) => {
+          this.askBeforeLinks = checked;
+        },
+      },
+      {
+        title: 'Selection toolbar',
+        detail: 'Show Comment, Style, Link, and Delete when text is selected.',
+        checked: this.showSelectionTools,
+        change: (checked: boolean) => {
+          this.showSelectionTools = checked;
+        },
+      },
+      {
+        title: 'Form field highlights',
+        detail: 'Outline form fields so they are easier to find. On by default.',
+        checked: this.highlightFormFields,
+        change: (checked: boolean) => {
+          this.highlightFormFields = checked;
+        },
+      },
+    ];
+    const query = this.settingsQuery.trim().toLowerCase();
+    if (!query || 'advanced settings'.includes(query)) return rows;
+    return rows.filter((row) => `${row.title} ${row.detail}`.toLowerCase().includes(query));
+  }
+
+  private settingsSections(): Array<{ id: SettingsSection; label: string }> {
+    const query = this.settingsQuery.trim().toLowerCase();
+    const sections: Array<{ id: SettingsSection; label: string; text: string }> = [
+      { id: 'theme', label: 'Theme', text: 'theme light dark mode appearance' },
+      {
+        id: 'shortcuts',
+        label: 'Shortcuts',
+        text: `shortcuts keyboard ${this.shortcutRows().map((row) => `${row.keys} ${row.description}`).join(' ')}`,
+      },
+      {
+        id: 'advanced',
+        label: 'Advanced',
+        text: `advanced ${this.advancedOptions().map((row) => `${row.title} ${row.detail}`).join(' ')}`,
+      },
+    ];
+    if (!query) return sections;
+    return sections.filter((section) => `${section.label} ${section.text}`.toLowerCase().includes(query));
+  }
+
+  private currentSettingsSection(): SettingsSection | null {
+    const sections = this.settingsSections();
+    if (sections.some((section) => section.id === this.settingsSection)) return this.settingsSection;
+    return sections[0]?.id ?? null;
+  }
+
+  private themeCard(theme: 'light' | 'dark', label: string) {
+    return html`
+      <button
+        class="theme-card"
+        type="button"
+        aria-pressed=${this.previewTheme === theme}
+        @click=${() => this.setPreviewTheme(theme)}
+      >
+        <span class="theme-preview ${theme}" aria-hidden="true">
+          <span class="theme-chrome"><i></i><i></i><i></i></span>
+          <span class="theme-body"><span class="theme-side"></span><span class="theme-main"></span></span>
+        </span>
+        <span class="theme-caption"><span class="theme-radio"></span>${label}</span>
+      </button>
+    `;
+  }
+
+  private settingsPane(section: SettingsSection) {
+    if (section === 'theme') {
+      return html`
+        <h3>Theme</h3>
+        <p class="settings-note">Choose how the editor looks. The document page stays white.</p>
+        <div class="theme-grid">
+          ${this.themeCard('light', 'Light')}
+          ${this.themeCard('dark', 'Dark')}
+        </div>
+      `;
+    }
+    if (section === 'shortcuts') {
+      const rows = this.listedShortcuts();
+      return html`
+        <h3>Shortcuts</h3>
+        <p class="settings-note">These shortcuts work while you are viewing a document.</p>
+        ${rows.length === 0
+          ? html`<p class="settings-empty">No shortcuts match that search.</p>`
+          : html`
+              <table class="shortcut-table">
+                <thead>
+                  <tr>
+                    <th>Command</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows.map(
+                    (row) => html`
+                      <tr>
+                        <td class="shortcut-keys">${row.keys}</td>
+                        <td>${row.description}</td>
+                      </tr>
+                    `,
+                  )}
+                </tbody>
+              </table>
+            `}
+      `;
+    }
+    const rows = this.advancedOptions();
+    return html`
+      <h3>Advanced</h3>
+      <p class="settings-note">A few viewing options. More will be added here.</p>
+      ${rows.length === 0
+        ? html`<p class="settings-empty">No advanced settings match that search.</p>`
+        : rows.map(
+            (row) => html`
+              <div class="adv-row">
+                <div>
+                  <h3>${row.title}</h3>
+                  <p>${row.detail}</p>
+                </div>
+                <label class="switch">
+                  <input
+                    type="checkbox"
+                    .checked=${row.checked}
+                    aria-label=${row.title}
+                    @change=${(event: Event) => row.change((event.target as HTMLInputElement).checked)}
+                  />
+                  <span></span>
+                </label>
+              </div>
+            `,
+          )}
+    `;
+  }
+
   private settingsDialog() {
     if (!this.previewSettingsOpen) return null;
+    const sections = this.settingsSections();
+    const section = this.currentSettingsSection();
     return html`
       <div
         class="word-modal"
@@ -2821,29 +3257,41 @@ export class PdfEditor extends LitElement {
           if (event.target === event.currentTarget) this.previewSettingsOpen = false;
         }}
       >
-        <div class="word-dialog" role="dialog" aria-label="Settings">
-          <h2>Settings</h2>
-          <p class="settings-label">Theme</p>
-          <label class="zoom-option">
+        <div class="settings-shell" role="dialog" aria-modal="true" aria-label="Settings">
+          <div class="settings-head">
+            <h2>Settings</h2>
+            <button class="settings-close" type="button" aria-label="Close" @click=${() => { this.previewSettingsOpen = false; }}>×</button>
+          </div>
+          <div class="settings-search">
             <input
-              type="radio"
-              name="preview-theme"
-              .checked=${this.previewTheme === 'light'}
-              @change=${() => this.setPreviewTheme('light')}
+              type="search"
+              placeholder="Search settings"
+              aria-label="Search settings"
+              .value=${this.settingsQuery}
+              @input=${(event: Event) => {
+                this.settingsQuery = (event.target as HTMLInputElement).value;
+              }}
             />
-            <span>Light</span>
-          </label>
-          <label class="zoom-option">
-            <input
-              type="radio"
-              name="preview-theme"
-              .checked=${this.previewTheme === 'dark'}
-              @change=${() => this.setPreviewTheme('dark')}
-            />
-            <span>Dark</span>
-          </label>
-          <div class="word-dialog-actions">
-            <button class="primary" type="button" @click=${() => { this.previewSettingsOpen = false; }}>Close</button>
+          </div>
+          <div class="settings-body">
+            <nav class="settings-nav" aria-label="Settings sections">
+              ${sections.map(
+                (item) => html`
+                  <button
+                    type="button"
+                    aria-current=${section === item.id ? 'true' : nothing}
+                    @click=${() => {
+                      this.settingsSection = item.id;
+                    }}
+                  >
+                    ${item.label}
+                  </button>
+                `,
+              )}
+            </nav>
+            <div class="settings-pane">
+              ${section ? this.settingsPane(section) : html`<p class="settings-empty">No settings match that search.</p>`}
+            </div>
           </div>
         </div>
       </div>
@@ -3486,7 +3934,8 @@ export class PdfEditor extends LitElement {
         return;
       }
       if (this.previewSettingsOpen) {
-        this.previewSettingsOpen = false;
+        if (this.settingsQuery) this.settingsQuery = '';
+        else this.previewSettingsOpen = false;
         event.preventDefault();
         return;
       }
@@ -3515,8 +3964,10 @@ export class PdfEditor extends LitElement {
       this.searchOpen = false;
       return;
     }
+    if (this.previewSettingsOpen) return;
     const target = event.composedPath()[0];
     if (target instanceof HTMLElement && target.closest('input, textarea, select')) return;
+    if (this.handleChord(event)) return;
     if (event.key === 'Enter' && this.shapeKind === 'polygon' && this.draftStroke.length >= 3) {
       event.preventDefault();
       this.finishPolygon();
@@ -3636,11 +4087,12 @@ export class PdfEditor extends LitElement {
       const hit = hitId ? this.marks.find((item) => item.id === hitId) : undefined;
       if (hit?.kind === 'link') {
         this.selectedMarkId = hit.id;
-        this.linkConfirmId = hit.id;
         this.textSelection = null;
         this.styleMenuOpen = false;
         this.textSelectStart = null;
         void this.refreshMarkBoxes();
+        if (this.askBeforeLinks) this.linkConfirmId = hit.id;
+        else this.followLink(hit);
         return;
       }
       const point = this.canvasPoint(event);
@@ -4441,6 +4893,8 @@ export class PdfEditor extends LitElement {
       )}
       <span class="select-handle" style="left:${first.left - 4}px;top:${first.top + first.height / 2 - 4}px"></span>
       <span class="select-handle" style="left:${last.left + last.width - 4}px;top:${last.top + last.height / 2 - 4}px"></span>
+      ${this.showSelectionTools
+        ? html`
       <div class="quick-bar" style="left:${barLeft}px;top:${bottom + 10}px">
         <button class="quick-comment" type="button" aria-label="Comment" data-tip="Comment" @click=${() => this.commentOnSelection()}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -4505,6 +4959,8 @@ export class PdfEditor extends LitElement {
               </button>
             </div>
           `
+        : nothing}
+      `
         : nothing}
     `;
   }
@@ -4885,7 +5341,10 @@ export class PdfEditor extends LitElement {
   private confirmOpenLink(): void {
     const mark = this.marks.find((item) => item.id === this.linkConfirmId && item.kind === 'link');
     this.linkConfirmId = null;
-    if (!mark) return;
+    if (mark) this.followLink(mark);
+  }
+
+  private followLink(mark: Mark): void {
     const target = this.linkTarget(mark);
     if (!target) return;
     if ('page' in target) {
@@ -6553,7 +7012,7 @@ export class PdfEditor extends LitElement {
                         ${this.fieldBoxes.map(
                           (field) => html`
                             <button
-                              class="field-target"
+                              class="field-target ${this.highlightFormFields ? 'highlighted' : ''}"
                               type="button"
                               aria-label=${field.name}
                               style="left:${field.left}px;top:${field.top}px;width:${field.width}px;height:${field.height}px"
