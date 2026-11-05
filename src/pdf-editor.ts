@@ -381,6 +381,7 @@ export class PdfEditor extends LitElement {
     button, input, select { font-family: inherit; }
 
     .root {
+      position: relative;
       height: 100%;
       min-height: 0;
       display: flex;
@@ -628,6 +629,7 @@ export class PdfEditor extends LitElement {
     .mark.link {
       border: 2px solid #1a73e8;
       background: transparent;
+      cursor: pointer;
     }
     .mark.image { padding: 0; background: transparent; line-height: 0; }
     .mark.image img { display: block; width: 100%; height: 100%; pointer-events: none; }
@@ -965,36 +967,107 @@ export class PdfEditor extends LitElement {
       z-index: 5;
       display: flex;
       align-items: center;
-      gap: 2px;
-      padding: 4px;
-      border: 1px solid #e0e3e7;
-      border-radius: 10px;
+      gap: 4px;
+      padding: 5px;
+      border: 1px solid rgba(32, 33, 36, 0.08);
+      border-radius: 16px;
       background: #fff;
-      box-shadow: 0 8px 24px rgba(60, 64, 67, 0.16);
+      box-shadow:
+        0 1px 2px rgba(32, 33, 36, 0.06),
+        0 12px 28px rgba(32, 33, 36, 0.16);
       transform: translateX(-50%);
     }
     .quick-bar button, .quick-styles button {
-      height: 32px;
+      position: relative;
+      height: 36px;
       border: none;
-      border-radius: 7px;
+      border-radius: 11px;
       background: transparent;
       color: #3c4043;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 6px;
+      gap: 8px;
       cursor: pointer;
     }
-    .quick-bar button { width: 32px; padding: 0; }
-    .quick-styles button { padding: 0 8px; font-size: 12px; }
-    .quick-bar button:hover, .quick-styles button:hover { background: #f1f3f4; }
-    .quick-bar button[aria-pressed='true'] { background: #e8f0fe; color: #1a73e8; }
-    .quick-bar button:disabled { opacity: 0.35; cursor: default; }
-    .quick-bar svg, .quick-styles svg { width: 16px; height: 16px; display: block; }
+    .quick-bar button { width: 36px; padding: 0; }
+    .quick-styles button {
+      height: 34px;
+      padding: 0 10px 0 8px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #202124;
+    }
+    .quick-sep {
+      width: 1px;
+      height: 18px;
+      margin: 0 2px;
+      background: #e6e8eb;
+      flex: none;
+    }
+    .quick-bar .quick-comment { color: #e37400; }
+    .quick-bar .quick-style { color: #7a4dff; }
+    .quick-bar .quick-link { color: #1a73e8; }
+    .quick-bar .quick-delete { color: #d93025; }
+    .quick-bar button:hover,
+    .quick-styles button:hover { background: #f4f6f8; }
+    .quick-bar .quick-comment:hover { background: #fff4e5; }
+    .quick-bar .quick-style:hover,
+    .quick-bar .quick-style[aria-pressed='true'] { background: #f3eefe; }
+    .quick-bar .quick-link:hover { background: #e8f0fe; }
+    .quick-bar .quick-delete:hover:not(:disabled) { background: #fdecea; }
+    .quick-bar button[aria-pressed='true'] { box-shadow: inset 0 0 0 1px currentColor; }
+    .quick-bar button:disabled { color: #bdc1c6; cursor: default; }
+    .quick-bar button:disabled:hover { background: transparent; }
+    .quick-bar svg, .quick-styles svg { width: 18px; height: 18px; display: block; }
+    .quick-bar button[data-tip]::after,
+    .quick-bar button[data-tip]::before {
+      position: absolute;
+      left: 50%;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.12s ease, transform 0.12s ease;
+    }
+    .quick-bar button[data-tip]::after {
+      content: attr(data-tip);
+      bottom: calc(100% + 10px);
+      transform: translateX(-50%) translateY(4px);
+      padding: 5px 8px;
+      border-radius: 7px;
+      background: #202124;
+      color: #fff;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1;
+      white-space: nowrap;
+      box-shadow: 0 6px 16px rgba(32, 33, 36, 0.2);
+    }
+    .quick-bar button[data-tip]::before {
+      content: "";
+      bottom: calc(100% + 2px);
+      transform: translateX(-50%) translateY(4px);
+      border: 5px solid transparent;
+      border-top-color: #202124;
+    }
+    .quick-bar button[data-tip]:hover::after,
+    .quick-bar button[data-tip]:focus-visible::after,
+    .quick-bar button[data-tip]:hover::before,
+    .quick-bar button[data-tip]:focus-visible::before {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+    .quick-styles {
+      flex-direction: column;
+      align-items: stretch;
+      min-width: 156px;
+      padding: 6px;
+    }
+    .quick-styles button { justify-content: flex-start; }
     .style-swatch {
-      width: 12px;
-      height: 12px;
-      border-radius: 2px;
+      width: 14px;
+      height: 14px;
+      border-radius: 4px;
+      box-shadow: inset 0 0 0 1px rgba(32, 33, 36, 0.12);
     }
     .comment {
       flex: 1;
@@ -1802,6 +1875,75 @@ export class PdfEditor extends LitElement {
     }
 
     .word-dialog-actions .primary:hover { background: #1967d2; }
+    .word-dialog-actions button:disabled { opacity: 0.45; cursor: default; }
+
+    .word-dialog.link-dialog,
+    .word-dialog.link-confirm {
+      width: min(440px, 100%);
+      max-height: calc(100% - 32px);
+      overflow: auto;
+    }
+
+    .link-field-label {
+      margin: 14px 0 6px;
+      font-size: 13px;
+      font-weight: 650;
+      color: #202124;
+    }
+
+    .link-bound {
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 8px;
+      background: #f4f8fe;
+      color: #1a73e8;
+      font-size: 14px;
+      line-height: 1.4;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+      white-space: pre-wrap;
+    }
+
+    .link-bound.muted {
+      background: #f8f9fa;
+      color: #80868b;
+      text-decoration: none;
+    }
+
+    .link-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 12px;
+      color: #3c4043;
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .link-field input {
+      height: 36px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      padding: 0 10px;
+      color: #202124;
+      font-size: 14px;
+      font-weight: 400;
+    }
+
+    .link-field input:focus {
+      outline: none;
+      border-color: #1a73e8;
+      box-shadow: 0 0 0 2px #d2e3fc;
+    }
+
+    .link-confirm-copy {
+      margin: 8px 0 0;
+      color: #3c4043;
+      font-size: 14px;
+      font-weight: 400;
+      line-height: 1.45;
+      word-break: break-word;
+    }
 
     :host(:fullscreen) { height: 100%; background: #e7e9ee; }
   `;
@@ -1879,6 +2021,8 @@ export class PdfEditor extends LitElement {
   @state() private draftArrow: ArrowEnd = 'none';
   @state() private polygonHover: { x: number; y: number } | null = null;
   @state() private noteDraft: NoteDraft | null = null;
+  @state() private linkPageInput = '';
+  @state() private linkConfirmId: string | null = null;
   @state() private notePreview: ViewportBox[] = [];
   @state() private freeTextBox: { left: number; top: number; width: number; height: number } | null = null;
   @state() private textSelection: QuickSelection | null = null;
@@ -2073,6 +2217,8 @@ export class PdfEditor extends LitElement {
     this.selectedMarkId = null;
     this.markBoxes = [];
     this.noteDraft = null;
+    this.linkPageInput = '';
+    this.linkConfirmId = null;
     this.notePreview = [];
     this.freeTextBox = null;
     this.textSelection = null;
@@ -3148,6 +3294,7 @@ export class PdfEditor extends LitElement {
     if (next === this.currentPage) return;
     this.highlights = [];
     this.noteDraft = null;
+    this.linkPageInput = '';
     this.notePreview = [];
     this.freeTextBox = null;
     this.textSelection = null;
@@ -3333,6 +3480,11 @@ export class PdfEditor extends LitElement {
       return;
     }
     if (event.key === 'Escape') {
+      if (this.linkConfirmId) {
+        this.linkConfirmId = null;
+        event.preventDefault();
+        return;
+      }
       if (this.previewSettingsOpen) {
         this.previewSettingsOpen = false;
         event.preventDefault();
@@ -3480,6 +3632,17 @@ export class PdfEditor extends LitElement {
       return;
     }
     if (!this.canDraw && !this.editText && this.pdf) {
+      const hitId = this.markIdFromEvent(event);
+      const hit = hitId ? this.marks.find((item) => item.id === hitId) : undefined;
+      if (hit?.kind === 'link') {
+        this.selectedMarkId = hit.id;
+        this.linkConfirmId = hit.id;
+        this.textSelection = null;
+        this.styleMenuOpen = false;
+        this.textSelectStart = null;
+        void this.refreshMarkBoxes();
+        return;
+      }
       const point = this.canvasPoint(event);
       if (point) {
         this.quickToken += 1;
@@ -4211,6 +4374,8 @@ export class PdfEditor extends LitElement {
       author: '',
       createdAt: 0,
     };
+    this.linkPageInput = '';
+    this.linkConfirmId = null;
     this.textSelection = null;
     this.styleMenuOpen = false;
   }
@@ -4260,6 +4425,13 @@ export class PdfEditor extends LitElement {
     const right = Math.max(...selection.boxes.map((box) => box.left + box.width));
     const bottom = Math.max(...selection.boxes.map((box) => box.top + box.height));
     const center = (left + right) / 2;
+    const pageWidth = this.canvasEl?.clientWidth ?? 0;
+    const place = (preferred: number, half: number) => {
+      if (pageWidth <= half * 2 + 12) return pageWidth / 2;
+      return Math.min(pageWidth - half - 6, Math.max(half + 6, preferred));
+    };
+    const barLeft = place(center, 90);
+    const styleLeft = place(center, 84);
     const canDelete = this.selectionMarkupIds().length > 0;
     return html`
       ${selection.boxes.map(
@@ -4269,41 +4441,56 @@ export class PdfEditor extends LitElement {
       )}
       <span class="select-handle" style="left:${first.left - 4}px;top:${first.top + first.height / 2 - 4}px"></span>
       <span class="select-handle" style="left:${last.left + last.width - 4}px;top:${last.top + last.height / 2 - 4}px"></span>
-      <div class="quick-bar" style="left:${center}px;top:${bottom + 10}px">
-        <button type="button" aria-label="Comment" @click=${() => this.commentOnSelection()}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
-            <path d="M6 7.2h12a1.5 1.5 0 0 1 1.5 1.5v6.2a1.5 1.5 0 0 1-1.5 1.5H11l-3.2 2.4v-2.4H6A1.5 1.5 0 0 1 4.5 14.9V8.7A1.5 1.5 0 0 1 6 7.2z"></path>
+      <div class="quick-bar" style="left:${barLeft}px;top:${bottom + 10}px">
+        <button class="quick-comment" type="button" aria-label="Comment" data-tip="Comment" @click=${() => this.commentOnSelection()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M6.2 5.2h11.6a2.2 2.2 0 0 1 2.2 2.2v5.7a2.2 2.2 0 0 1-2.2 2.2H12l-3.1 2.5a.7.7 0 0 1-1.1-.6v-1.9H6.2A2.2 2.2 0 0 1 4 13.1V7.4a2.2 2.2 0 0 1 2.2-2.2z"></path>
+            <path d="M8 9.1h8M8 12h5" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"></path>
           </svg>
         </button>
         <button
+          class="quick-style"
           type="button"
           aria-label="Style"
+          data-tip="Style"
           aria-pressed=${this.styleMenuOpen}
           @click=${() => {
             this.styleMenuOpen = !this.styleMenuOpen;
           }}
         >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-            <circle cx="9" cy="10" r="3.2"></circle>
-            <circle cx="15" cy="9" r="2.2"></circle>
-            <circle cx="14.5" cy="14.5" r="2.4"></circle>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M12 3.2a8.8 8.8 0 1 0 1.4 17.4c.7.1 1.3-.4 1.4-1.1.1-.8-.2-1.4-.8-1.8-.5-.3-.7-.8-.6-1.3.2-.8.9-1.3 1.7-1.3H17a4.8 4.8 0 0 0 4.8-5.2A8.6 8.6 0 0 0 12 3.2z"></path>
+            <circle cx="8.2" cy="9.2" r="1.35" fill="#f9ab00"></circle>
+            <circle cx="12" cy="7.3" r="1.35" fill="#1a73e8"></circle>
+            <circle cx="15.6" cy="9.4" r="1.35" fill="#d93025"></circle>
+            <circle cx="9.4" cy="13.2" r="1.35" fill="#1e8e3e"></circle>
           </svg>
         </button>
-        <button type="button" aria-label="Link" @click=${() => this.linkOnSelection()}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
-            <path d="M10 13.5a4 4 0 0 0 5.7.3l2-2a4 4 0 0 0-5.7-5.6l-1.1 1.1"></path>
-            <path d="M14 10.5a4 4 0 0 0-5.7-.3l-2 2a4 4 0 0 0 5.7 5.6l1.1-1.1"></path>
+        <button class="quick-link" type="button" aria-label="Add link" data-tip="Add link" @click=${() => this.linkOnSelection()}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" aria-hidden="true">
+            <path d="M10 13.6a3.6 3.6 0 0 0 5.1.4l1.7-1.7a3.6 3.6 0 0 0-5.1-5.1L10.6 8.3"></path>
+            <path d="M14 10.4a3.6 3.6 0 0 0-5.1-.4l-1.7 1.7a3.6 3.6 0 0 0 5.1 5.1l1.1-1.1"></path>
           </svg>
         </button>
-        <button type="button" aria-label="Delete" ?disabled=${!canDelete} @click=${() => this.deleteOnSelection()}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" aria-hidden="true">
-            <path d="M8 8.5h8M9.5 8.5v-1h5v1M9.2 8.5l.5 9h4.6l.5-9"></path>
+        <span class="quick-sep"></span>
+        <button
+          class="quick-delete"
+          type="button"
+          aria-label="Delete"
+          data-tip=${canDelete ? 'Delete' : 'Nothing to delete'}
+          ?disabled=${!canDelete}
+          @click=${() => this.deleteOnSelection()}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path fill="currentColor" d="M9.2 4.4h5.6l.5 1.5H19v1.7H5V5.9h3.7l.5-1.5z"></path>
+            <path fill="currentColor" d="M6.6 9.2h10.8l-.7 9.6a1.6 1.6 0 0 1-1.6 1.5H8.9a1.6 1.6 0 0 1-1.6-1.5l-.7-9.6z"></path>
+            <path d="M10 12.1v5.2M14 12.1v5.2" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round"></path>
           </svg>
         </button>
       </div>
       ${this.styleMenuOpen
         ? html`
-            <div class="quick-styles" style="left:${center}px;top:${bottom + 50}px">
+            <div class="quick-styles" style="left:${styleLeft}px;top:${bottom + 64}px">
               <button type="button" @click=${() => this.applySelectionStyle('highlight')}>
                 <span class="style-swatch" style="background:#f9ab00"></span>
                 Highlight
@@ -4569,6 +4756,7 @@ export class PdfEditor extends LitElement {
     this.noteDraft = null;
     this.notePreview = [];
     this.freeTextBox = null;
+    this.linkPageInput = '';
     this.textSelection = null;
     this.styleMenuOpen = false;
     this.editDraft = null;
@@ -4585,12 +4773,18 @@ export class PdfEditor extends LitElement {
     const pdf = this.pdf;
     const pageNumber = this.currentPage;
     if (!pdf) return;
-    void pdf.getPage(pageNumber).then((page) => {
+    this.draftBox = null;
+    void pdf.getPage(pageNumber).then(async (page) => {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.insertKind !== 'link') return;
       const viewport = page.getViewport({ scale: this.scale });
       const startPdf = viewportToPdf(viewport, start.x, start.y);
       const endPdf = viewportToPdf(viewport, end.x, end.y);
       const rect = pdfRectFromPoints(startPdf.x, startPdf.y, endPdf.x, endPdf.y);
+      const runs = await this.wordsForPage(pageNumber);
+      if (this.pdf !== pdf || this.currentPage !== pageNumber || this.insertKind !== 'link') return;
+      const hit = runs.filter((run) => rectsIntersect(rect, run.rect));
+      this.linkPageInput = '';
+      this.linkConfirmId = null;
       this.noteDraft = {
         kind: 'link',
         page: pageNumber,
@@ -4601,12 +4795,179 @@ export class PdfEditor extends LitElement {
         text: '',
         tip: null,
         rect,
-        quote: '',
-        rects: [],
+        quote: hit.map((run) => run.text).join(' '),
+        rects: hit.map((run) => run.rect),
         author: '',
         createdAt: 0,
       };
     });
+  }
+
+  private linkTarget(mark: Mark): { url: string } | { page: number } | null {
+    const pageMatch = /^page:(\d+)$/.exec(mark.text.trim());
+    if (pageMatch) {
+      const page = Number(pageMatch[1]);
+      if (page >= 1) return { page };
+    }
+    const url = mark.text.trim();
+    return url ? { url } : null;
+  }
+
+  private linkSummary(mark: Mark): string {
+    const target = this.linkTarget(mark);
+    if (!target) return mark.text;
+    return 'page' in target ? `Page ${target.page}` : target.url;
+  }
+
+  private safeHttpUrl(value: string): string | null {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `https://${trimmed}`;
+    try {
+      const url = new URL(withScheme);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      return url.href;
+    } catch {
+      return null;
+    }
+  }
+
+  private linkPageNumber(): number | null {
+    const raw = this.linkPageInput.trim();
+    if (!/^\d+$/.test(raw)) return null;
+    const page = Number(raw);
+    if (page < 1 || page > this.totalPages) return null;
+    return page;
+  }
+
+  private linkDraftReady(): boolean {
+    const draft = this.noteDraft;
+    if (!draft || draft.kind !== 'link') return false;
+    if (draft.text.trim()) return this.safeHttpUrl(draft.text) !== null;
+    return this.linkPageNumber() !== null;
+  }
+
+  private onLinkUrlInput(event: Event): void {
+    const draft = this.noteDraft;
+    if (!draft || draft.kind !== 'link') return;
+    const text = (event.target as HTMLInputElement).value;
+    this.noteDraft = { ...draft, text };
+    if (text.trim()) this.linkPageInput = '';
+  }
+
+  private onLinkPageInput(event: Event): void {
+    const draft = this.noteDraft;
+    if (!draft || draft.kind !== 'link') return;
+    const text = (event.target as HTMLInputElement).value;
+    this.linkPageInput = text;
+    if (text.trim()) this.noteDraft = { ...draft, text: '' };
+  }
+
+  private commitLink(event: Event): void {
+    event.preventDefault();
+    const draft = this.noteDraft;
+    if (!draft || draft.kind !== 'link' || !draft.rect) return;
+    const safeUrl = this.safeHttpUrl(draft.text);
+    const page = this.linkPageNumber();
+    const stored = safeUrl ?? (page ? `page:${page}` : '');
+    if (!stored) return;
+    const rects = draft.rects.length > 0 ? draft.rects : [draft.rect];
+    const mark = this.makeMark('link', draft.page, rects, stored);
+    mark.quote = draft.quote;
+    this.cancelDraft();
+    this.marks = [...this.marks, mark];
+    this.selectedMarkId = mark.id;
+    this.replyText = '';
+    this.commentsOpen = true;
+    void this.refreshMarkBoxes();
+  }
+
+  private confirmOpenLink(): void {
+    const mark = this.marks.find((item) => item.id === this.linkConfirmId && item.kind === 'link');
+    this.linkConfirmId = null;
+    if (!mark) return;
+    const target = this.linkTarget(mark);
+    if (!target) return;
+    if ('page' in target) {
+      this.goToPage(target.page);
+      return;
+    }
+    const safeUrl = this.safeHttpUrl(target.url);
+    if (!safeUrl) return;
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
+  }
+
+  private linkDialog() {
+    const draft = this.noteDraft;
+    if (!draft || draft.kind !== 'link') return null;
+    const bound = draft.quote.trim();
+    return html`
+      <div
+        class="word-modal"
+        @click=${(event: Event) => {
+          if (event.target === event.currentTarget) this.cancelDraft();
+        }}
+      >
+        <form class="word-dialog link-dialog" role="dialog" aria-label="Add link" @submit=${this.commitLink}>
+          <h2>Add link</h2>
+          <p class="link-field-label">Link Text</p>
+          <p class="link-bound ${bound ? '' : 'muted'}">${bound || 'No text selected'}</p>
+          <label class="link-field">
+            URL
+            <input
+              type="text"
+              placeholder="Enter URL"
+              autofocus
+              .value=${draft.text}
+              @input=${this.onLinkUrlInput}
+            />
+          </label>
+          <label class="link-field">
+            Page
+            <input
+              type="text"
+              inputmode="numeric"
+              placeholder="Page number"
+              .value=${this.linkPageInput}
+              @input=${this.onLinkPageInput}
+            />
+          </label>
+          <div class="word-dialog-actions">
+            <button type="button" @click=${() => this.cancelDraft()}>Cancel</button>
+            <button class="primary" type="submit" ?disabled=${!this.linkDraftReady()}>Link</button>
+          </div>
+        </form>
+      </div>
+    `;
+  }
+
+  private linkConfirmDialog() {
+    const mark = this.marks.find((item) => item.id === this.linkConfirmId && item.kind === 'link');
+    if (!mark) return null;
+    const target = this.linkTarget(mark);
+    if (!target) return null;
+    const destination = 'page' in target ? `page ${target.page}` : target.url;
+    const message =
+      'page' in target
+        ? `This will take you to ${destination}. Are you sure you want to open it?`
+        : `This will open a new tab and take you to the ${destination}. Are you sure you want to open it?`;
+    return html`
+      <div
+        class="word-modal"
+        @click=${(event: Event) => {
+          if (event.target === event.currentTarget) this.linkConfirmId = null;
+        }}
+      >
+        <div class="word-dialog link-confirm" role="dialog" aria-label="Open link">
+          <h2>Open link</h2>
+          <p class="link-confirm-copy">${message}</p>
+          <div class="word-dialog-actions">
+            <button type="button" @click=${() => { this.linkConfirmId = null; }}>Cancel</button>
+            <button class="primary" type="button" @click=${() => this.confirmOpenLink()}>Confirm</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   private openStampMenu(point: { x: number; y: number }): void {
@@ -5423,7 +5784,7 @@ export class PdfEditor extends LitElement {
                     <span class="comment-page">Page ${mark.page}${mark.author ? ` · ${mark.author}` : ''}</span>
                   `}
               ${note && mark.quote ? html`<span class="comment-quote">${mark.quote}</span>` : nothing}
-              ${editing ? nothing : html`<span class=${note ? 'comment-body' : 'comment-text'}>${mark.text}</span>`}
+              ${editing ? nothing : html`<span class=${note ? 'comment-body' : 'comment-text'}>${mark.kind === 'link' ? this.linkSummary(mark) : mark.text}</span>`}
             </button>
             <div class="comment-tools">
               <button
@@ -6218,7 +6579,7 @@ export class PdfEditor extends LitElement {
                 ${this.savedNotePopup()}
                 ${this.freeTextEditor()}
                 ${this.quickSelectionUi()}
-                ${this.noteDraft && this.noteDraft.kind !== 'note' && this.noteDraft.kind !== 'freetext' && this.noteDraft.page === this.currentPage
+                ${this.noteDraft && this.noteDraft.kind !== 'note' && this.noteDraft.kind !== 'freetext' && this.noteDraft.kind !== 'link' && this.noteDraft.page === this.currentPage
                   ? html`
                       <form
                         class="note-box"
@@ -6395,6 +6756,8 @@ export class PdfEditor extends LitElement {
           accept="image/png,image/jpeg,image/gif,image/webp"
           @change=${this.onImageChosen}
         />
+        ${this.linkDialog()}
+        ${this.linkConfirmDialog()}
         ${this.settingsDialog()}
         ${this.filterDialog()}
       </div>
