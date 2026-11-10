@@ -95,12 +95,15 @@ function turnedRotation(pageRotate: number, quarterTurns: number): number {
   return (((pageRotate || 0) + quarterTurns * 90) % 360 + 360) % 360;
 }
 
+type LayerConfig = Awaited<ReturnType<PDFDocumentProxy['getOptionalContentConfig']>>;
+
 export async function paintPage(
   pdf: PDFDocumentProxy,
   pageNumber: number,
   canvas: HTMLCanvasElement,
   cssScale: number,
   quarterTurns = 0,
+  optionalContent?: Promise<LayerConfig> | null,
 ): Promise<RenderTask> {
   const page = await pdf.getPage(pageNumber);
   const viewport = page.getViewport({ scale: cssScale, rotation: turnedRotation(page.rotate, quarterTurns) });
@@ -113,6 +116,7 @@ export async function paintPage(
     canvas,
     viewport,
     transform: pixelRatio === 1 ? undefined : [pixelRatio, 0, 0, pixelRatio, 0, 0],
+    optionalContentConfigPromise: optionalContent ?? undefined,
   });
 }
 

@@ -152,6 +152,20 @@ interface PageBookmark {
   title: string;
 }
 
+interface DocumentLayer {
+  id: string;
+  name: string;
+  depth: number;
+  visible: boolean;
+}
+
+interface DocumentFile {
+  id: string;
+  name: string;
+  description: string;
+  size: number | null;
+}
+
 interface EditDraft {
   page: number;
   rect: PdfRect;
@@ -1666,6 +1680,47 @@ export class PdfEditor extends LitElement {
       font-size: 13px;
       line-height: 1.45;
     }
+    .pane-empty {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 36px 24px;
+      color: #80868b;
+      text-align: center;
+    }
+    .pane-empty svg { width: 52px; height: 52px; }
+    .pane-empty p { margin: 0; max-width: 180px; font-size: 13px; line-height: 1.4; }
+    .layer-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 7px 4px;
+      color: #202124;
+      font-size: 13px;
+      line-height: 1.35;
+      cursor: pointer;
+    }
+    .layer-row input { margin-top: 2px; accent-color: #1a73e8; }
+    .file-row {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 2px;
+      width: 100%;
+      padding: 8px 6px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      font: inherit;
+    }
+    .file-row:hover { background: #e8f0fe; }
+    .file-name { color: #202124; font-size: 13px; }
+    .file-meta { color: #80868b; font-size: 11px; }
     .pane-section-head {
       display: flex;
       align-items: center;
@@ -2493,6 +2548,8 @@ export class PdfEditor extends LitElement {
     .preview-dark .pane-foot { border-top-color: #3c4043; }
     .preview-dark .pane-foot p,
     .preview-dark .pane-soon p,
+    .preview-dark .pane-empty,
+    .preview-dark .file-meta,
     .preview-dark .bookmark-empty,
     .preview-dark .bookmark-page,
     .preview-dark .thumb { color: #9aa0a6; }
@@ -2501,7 +2558,10 @@ export class PdfEditor extends LitElement {
     .preview-dark .outline-link,
     .preview-dark .bookmark-title { color: #e8eaed; }
     .preview-dark .outline-link:hover:not(:disabled),
-    .preview-dark .bookmark-main:hover { background: #3c4043; }
+    .preview-dark .bookmark-main:hover,
+    .preview-dark .file-row:hover { background: #3c4043; }
+    .preview-dark .layer-row,
+    .preview-dark .file-name { color: #e8eaed; }
     .preview-dark .outline-link[aria-current='page'] { color: #8ab4f8; }
     .preview-dark .pane-toggle,
     .preview-dark .pane-add { border-color: #3c4043; }
@@ -2962,6 +3022,8 @@ export class PdfEditor extends LitElement {
   @state() private showBookmarksOnPage = false;
   @state() private bookmarkEditing = false;
   @state() private bookmarkDraft: { page: number; title: string } | null = null;
+  @state() private documentLayers: DocumentLayer[] = [];
+  @state() private documentFiles: DocumentFile[] = [];
   @state() private dragOver = false;
   @state() private panning = false;
   @state() private findQuery = '';
@@ -3061,6 +3123,9 @@ export class PdfEditor extends LitElement {
   private thumbsPending = new Set<number>();
   private thumbToken = 0;
   private outlineToken = 0;
+  private layerToken = 0;
+  private fileToken = 0;
+  private layerConfig: Awaited<ReturnType<PDFDocumentProxy['getOptionalContentConfig']>> | null = null;
 
   /** 1-based page currently shown. */
   get page(): number {
@@ -3292,6 +3357,8 @@ export class PdfEditor extends LitElement {
       this.bookmarkDraft = null;
       this.bookmarkEditing = false;
       void this.refreshOutline();
+      void this.refreshLayers();
+      void this.refreshFiles();
       this.loading = false;
       this.resetScroll = true;
       this.dispatchEvent(
@@ -4399,9 +4466,9 @@ export class PdfEditor extends LitElement {
     }
   }
 
-  private downloadFile(bytes: Uint8Array, name: string): void {
+  private downloadFile(bytes: Uint8Array, name: string, type = 'application/pdf'): void {
     const copy = new Uint8Array(bytes);
-    const url = URL.createObjectURL(new Blob([copy.buffer], { type: 'application/pdf' }));
+    const url = URL.createObjectURL(new Blob([copy.buffer], { type }));
     const link = document.createElement('a');
     link.href = url;
     link.download = name;
@@ -4464,6 +4531,8 @@ export class PdfEditor extends LitElement {
     this.scheduleRender();
     if (this.findQuery.trim()) this.queueSearch();
     void this.refreshOutline();
+    void this.refreshLayers();
+    void this.refreshFiles();
   }
 
   private async readSource(source: PdfSource): Promise<Uint8Array | string> {
@@ -4495,7 +4564,7 @@ export class PdfEditor extends LitElement {
       if (token !== this.renderToken) return;
       const scale = this.scaleFor(size.width, size.height, viewer);
       this.scale = scale;
-      const task = await paintPage(pdf, this.currentPage, canvas, scale, this.viewTurn);
+      const task = await paintPage(pdf, this.currentPage, canvas, scale, this.viewTurn, this.layerPromise());
       if (token !== this.renderToken) {
         task.cancel();
         return;
@@ -4513,7 +4582,7 @@ export class PdfEditor extends LitElement {
       if (token !== this.renderToken) return;
       await this.paintSideSheets(pdf, scale, token);
       if (token !== this.renderToken) return;
-      canvas.dataset.sheetStamp = `${this.viewTurn}:${scale.toFixed(4)}`;
+      canvas.dataset.sheetStamp = this.viewStamp(scale);
       this.pageReady = true;
       this.renderTask = null;
       if (this.resetScroll) {
@@ -4593,7 +4662,7 @@ export class PdfEditor extends LitElement {
   }
 
   private async paintSideSheets(pdf: PDFDocumentProxy, scale: number, token: number): Promise<void> {
-    const stamp = `${this.viewTurn}:${scale.toFixed(4)}`;
+    const stamp = this.viewStamp(scale);
     const canvases = this.renderRoot.querySelectorAll('canvas.sheet-canvas');
     for (const node of canvases) {
       if (!(node instanceof HTMLCanvasElement)) continue;
@@ -4601,7 +4670,7 @@ export class PdfEditor extends LitElement {
       const page = Number(node.dataset.sheetCanvas);
       if (!page || token !== this.renderToken) return;
       try {
-        const task = await paintPage(pdf, page, node, scale, this.viewTurn);
+        const task = await paintPage(pdf, page, node, scale, this.viewTurn, this.layerPromise());
         if (token !== this.renderToken) {
           task.cancel();
           return;
@@ -4877,7 +4946,7 @@ export class PdfEditor extends LitElement {
     try {
       const size = await pageSizeAtScale1(pdf, pageNumber, this.viewTurn);
       if (token !== this.thumbToken || this.pdf !== pdf) return;
-      const task = await paintPage(pdf, pageNumber, canvas, this.thumbWidth / size.width, this.viewTurn);
+      const task = await paintPage(pdf, pageNumber, canvas, this.thumbWidth / size.width, this.viewTurn, this.layerPromise());
       if (token !== this.thumbToken || this.pdf !== pdf) {
         task.cancel();
         return;
@@ -8298,19 +8367,200 @@ export class PdfEditor extends LitElement {
     `;
   }
 
-  private paneSoon() {
-    const copy = {
-      layers: ['Layers', 'Optional content in this document will be listed here.'],
-      files: ['Attachments', 'Files attached to this document will be listed here.'],
-    } as const;
-    const tab = this.pageTab === 'files' ? 'files' : 'layers';
-    const [title, body] = copy[tab];
-    return html`
-      <div class="pane-soon">
-        <h2>${title}</h2>
-        <p>${body}</p>
-      </div>
-    `;
+  private viewStamp(scale: number): string {
+    return `${this.viewTurn}:${scale.toFixed(4)}:${this.layerConfig?.getHash() ?? ''}`;
+  }
+
+  private layerPromise(): Promise<NonNullable<typeof this.layerConfig>> | null {
+    return this.layerConfig ? Promise.resolve(this.layerConfig) : null;
+  }
+
+  private layersFrom(config: NonNullable<typeof this.layerConfig>): DocumentLayer[] {
+    const order = config.getOrder();
+    if (!Array.isArray(order)) return [];
+    const layers: DocumentLayer[] = [];
+    const seen = new Set<string>();
+    const add = (id: string, depth: number): void => {
+      if (seen.has(id)) return;
+      const group = config.getGroup(id);
+      if (!group) return;
+      seen.add(id);
+      const name = typeof group.name === 'string' && group.name.trim() ? group.name.trim() : 'Layer';
+      layers.push({ id, name, depth, visible: Boolean(group.visible) });
+    };
+    const walk = (items: unknown[], depth: number): void => {
+      for (const item of items) {
+        if (typeof item === 'string') {
+          add(item, depth);
+          continue;
+        }
+        if (Array.isArray(item)) {
+          walk(item, depth + 1);
+          continue;
+        }
+        if (item && typeof item === 'object' && 'order' in item && Array.isArray(item.order)) {
+          const folder = item as { name?: unknown; order: unknown[] };
+          if (typeof folder.name === 'string' && folder.name.trim()) {
+            layers.push({ id: `folder-${layers.length}`, name: folder.name.trim(), depth, visible: true });
+          }
+          walk(folder.order, typeof folder.name === 'string' && folder.name.trim() ? depth + 1 : depth);
+          continue;
+        }
+        const id = this.layerId(item);
+        if (id) add(id, depth);
+      }
+    };
+    walk(order, 0);
+    return layers;
+  }
+
+  private layerId(item: unknown): string | null {
+    if (typeof item === 'string' && item) return item;
+    if (item && typeof item === 'object' && 'id' in item && typeof item.id === 'string' && item.id) return item.id;
+    return null;
+  }
+
+  private async refreshLayers(): Promise<void> {
+    const pdf = this.pdf;
+    const token = ++this.layerToken;
+    if (!pdf) {
+      this.layerConfig = null;
+      this.documentLayers = [];
+      return;
+    }
+    try {
+      const config = await pdf.getOptionalContentConfig();
+      if (token !== this.layerToken || this.pdf !== pdf) return;
+      const layers = this.layersFrom(config);
+      this.layerConfig = layers.length ? config : null;
+      this.documentLayers = layers;
+      if (layers.length) this.scheduleRender();
+    } catch {
+      if (token !== this.layerToken) return;
+      this.layerConfig = null;
+      this.documentLayers = [];
+    }
+  }
+
+  private setLayerVisible(id: string, visible: boolean): void {
+    const config = this.layerConfig;
+    if (!config) return;
+    config.setVisibility(id, visible, true);
+    this.documentLayers = this.documentLayers.map((layer) => ({
+      ...layer,
+      visible: Boolean(config.getGroup(layer.id)?.visible),
+    }));
+    this.thumbsPainted.clear();
+    this.thumbsPending.clear();
+    this.cancelThumbnails();
+    this.scheduleRender();
+    if (this.pagesPressed && this.pageTab === 'thumbs') {
+      void this.updateComplete.then(() => this.observeThumbnails());
+    }
+  }
+
+  private async refreshFiles(): Promise<void> {
+    const pdf = this.pdf;
+    const token = ++this.fileToken;
+    if (!pdf) {
+      this.documentFiles = [];
+      return;
+    }
+    try {
+      const map = await pdf.getAttachments();
+      if (token !== this.fileToken || this.pdf !== pdf) return;
+      const files: DocumentFile[] = [];
+      map?.forEach((file, id) => {
+        const name = file.filename || file.rawFilename || 'Attachment';
+        files.push({
+          id,
+          name,
+          description: file.description || '',
+          size: file.content?.byteLength ?? null,
+        });
+      });
+      files.sort((a, b) => a.name.localeCompare(b.name));
+      this.documentFiles = files;
+    } catch {
+      if (token === this.fileToken) this.documentFiles = [];
+    }
+  }
+
+  private async saveAttachment(file: DocumentFile): Promise<void> {
+    const pdf = this.pdf;
+    if (!pdf) return;
+    try {
+      const bytes = await pdf.getAttachmentContent(file.id);
+      if (!bytes?.byteLength) {
+        this.reportError('Could not save this attachment.', new Error('This attachment is empty.'));
+        return;
+      }
+      this.downloadFile(bytes, file.name, 'application/octet-stream');
+    } catch (error) {
+      this.reportError('Could not save this attachment.', error);
+    }
+  }
+
+  private fileSizeLabel(size: number | null): string {
+    if (size == null) return 'Save';
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024))} KB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+
+  private layerPane() {
+    return this.documentLayers.length
+      ? html`
+          <div class="pane-section-head"><h2>Layers</h2></div>
+          <div class="pane-list">
+            ${this.documentLayers.map(
+              (layer) => html`
+                ${layer.id.startsWith('folder-')
+                  ? html`<div class="layer-row" style=${`padding-left:${8 + layer.depth * 16}px`}><span>${layer.name}</span></div>`
+                  : html`
+                      <label class="layer-row" style=${`padding-left:${8 + layer.depth * 16}px`}>
+                        <input
+                          type="checkbox"
+                          .checked=${layer.visible}
+                          aria-label=${layer.name}
+                          @change=${(event: Event) => this.setLayerVisible(layer.id, (event.target as HTMLInputElement).checked)}
+                        />
+                        <span>${layer.name}</span>
+                      </label>
+                    `}
+              `,
+            )}
+          </div>
+        `
+      : html`
+          <div class="pane-empty">
+            ${iconPaneLayers()}
+            <p>This document has no layers.</p>
+          </div>
+        `;
+  }
+
+  private filePane() {
+    return this.documentFiles.length
+      ? html`
+          <div class="pane-section-head"><h2>Attachments</h2></div>
+          <div class="pane-list">
+            ${this.documentFiles.map(
+              (file) => html`
+                <button type="button" class="file-row" aria-label=${`Save ${file.name}`} @click=${() => void this.saveAttachment(file)}>
+                  <span class="file-name">${file.name}</span>
+                  <span class="file-meta">${file.description ? `${file.description} · ` : ''}${this.fileSizeLabel(file.size)}</span>
+                </button>
+              `,
+            )}
+          </div>
+        `
+      : html`
+          <div class="pane-empty">
+            ${iconPaneClip()}
+            <p>This document has no attachments.</p>
+          </div>
+        `;
   }
 
   private thumbnailPane() {
@@ -8434,7 +8684,9 @@ export class PdfEditor extends LitElement {
             ? this.outlinePane()
             : this.pageTab === 'bookmarks'
               ? this.bookmarkPane()
-              : this.paneSoon()}
+              : this.pageTab === 'layers'
+                ? this.layerPane()
+                : this.filePane()}
       </aside>
     `;
   }
