@@ -30,7 +30,8 @@
     "docx-preview": "^0.4.1",
     "lit": "^3.3.3",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^6.4.299"
+    "pdfjs-dist": "^6.4.299",
+    "pptx-preview": "^1.0.7"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

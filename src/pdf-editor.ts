@@ -52,6 +52,7 @@ import {
   type TextRun,
   type ViewportBox,
 } from './pdf-engine';
+import { renderSlidePages } from './slide-preview';
 import { isZipDocument, renderDocxPages } from './word-preview';
 
 export interface PdfLoadDetail {
@@ -304,7 +305,7 @@ const MODES: ReadonlyArray<{ id: EditorMode; label: string }> = [
 const ZOOM_STEPS = [0.25, 0.5, 0.65, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4];
 
 const OPEN_ACCEPT =
-  'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.png,.jpg,.jpeg,image/png,image/jpeg';
+  'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,.png,.jpg,.jpeg,image/png,image/jpeg';
 const WORD_ZOOM_LEVELS = [2, 1.5, 1, 0.75, 0.5] as const;
 
 type WordFit = 'percent' | 'page' | 'width';
@@ -323,6 +324,25 @@ function wordFormat(source: PdfSource): 'docx' | 'doc' | null {
     const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
     if (path.endsWith('.docx')) return 'docx';
     if (path.endsWith('.doc')) return 'doc';
+  }
+  return null;
+}
+
+type SlideFormat = 'pptx' | 'ppt';
+
+function slideFormat(source: PdfSource): SlideFormat | null {
+  if (source instanceof File) {
+    const name = source.name.toLowerCase();
+    if (name.endsWith('.pptx')) return 'pptx';
+    if (name.endsWith('.ppt')) return 'ppt';
+    if (source.type === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') return 'pptx';
+    if (source.type === 'application/vnd.ms-powerpoint') return 'ppt';
+    return null;
+  }
+  if (typeof source === 'string') {
+    const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
+    if (path.endsWith('.pptx')) return 'pptx';
+    if (path.endsWith('.ppt')) return 'ppt';
   }
   return null;
 }
@@ -2411,6 +2431,20 @@ export class PdfEditor extends LitElement {
       background: #fff;
     }
 
+    .word-pages .pptx-preview-wrapper {
+      background: transparent !important;
+      width: max-content !important;
+      height: auto !important;
+      margin: 0 !important;
+      overflow: visible !important;
+    }
+
+    .word-pages .preview-slide {
+      margin: 0 !important;
+    }
+
+    .word-pages .preview-slide[hidden] { display: none !important; }
+
     .word-bar {
       flex: none;
       height: 44px;
@@ -2985,7 +3019,7 @@ export class PdfEditor extends LitElement {
   @state() private loading = false;
   @state() private errorMessage = '';
   @state() private pageReady = false;
-  @state() private documentKind: 'pdf' | 'word' | 'image' = 'pdf';
+  @state() private documentKind: 'pdf' | 'word' | 'image' | 'slides' = 'pdf';
   @state() private wordFit: WordFit = 'percent';
   @state() private wordPercent = 1;
   @state() private wordScaleLabel = 100;
@@ -3266,10 +3300,14 @@ export class PdfEditor extends LitElement {
     }
   }
 
-  /** Open a PDF, or preview a Word document or image, from a URL, a File, or binary data. */
+  /** Open a PDF, or preview a Word document, presentation, or image, from a URL, a File, or binary data. */
   async load(source: PdfSource): Promise<void> {
     if (imageFormat(source)) {
       await this.loadImage(source);
+      return;
+    }
+    if (slideFormat(source)) {
+      await this.loadSlides(source);
       return;
     }
     if (wordFormat(source)) {
@@ -3451,6 +3489,69 @@ export class PdfEditor extends LitElement {
     }
   }
 
+  private async loadSlides(source: PdfSource): Promise<void> {
+    const id = ++this.loadId;
+    const format = slideFormat(source);
+    this.documentKind = 'slides';
+    this.loading = true;
+    this.errorMessage = '';
+    this.pageReady = false;
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
+    this.wordFit = 'percent';
+    this.wordPercent = 1;
+    this.wordScaleLabel = 100;
+    this.wordZoomDraft = 1;
+    this.totalPages = 0;
+    this.currentPage = 1;
+    this.wordBytes = null;
+    this.clearImagePreview();
+    this.clearSearch();
+    this.releasePdf();
+
+    try {
+      const bytes = await this.sourceBytes(source, 'Could not read this presentation.');
+      if (id !== this.loadId) return;
+      if (!isZipDocument(bytes)) {
+        throw new Error(
+          format === 'ppt'
+            ? 'Older .ppt files can’t be previewed. Save the presentation as .pptx and open that file.'
+            : 'Could not open this presentation.',
+        );
+      }
+      this.wordBytes = bytes;
+      this.downloadName = this.slideFileName(source);
+      const generation = ++this.wordGeneration;
+      await this.updateComplete;
+      if (id !== this.loadId || this.documentKind !== 'slides') return;
+      await this.paintSlides(generation);
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.dispatchEvent(
+        new CustomEvent<PdfLoadDetail>('pdf-load', {
+          detail: { pages: this.totalPages },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.pageReady = false;
+      this.wordBytes = null;
+      this.totalPages = 0;
+      const message = this.slideErrorText(error);
+      this.errorMessage = message;
+      this.dispatchEvent(
+        new CustomEvent<PdfErrorDetail>('pdf-error', {
+          detail: { message },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
+
   private async loadImage(source: PdfSource): Promise<void> {
     const format = imageFormat(source);
     const id = ++this.loadId;
@@ -3530,7 +3631,7 @@ export class PdfEditor extends LitElement {
   }
 
   private isReadOnlyPreview(): boolean {
-    return this.documentKind === 'word' || this.documentKind === 'image';
+    return this.documentKind === 'word' || this.documentKind === 'image' || this.documentKind === 'slides';
   }
 
   private clearImagePreview(): void {
@@ -3583,6 +3684,25 @@ export class PdfEditor extends LitElement {
     return new Uint8Array(await response.arrayBuffer());
   }
 
+  private slideFileName(source: PdfSource): string {
+    if (typeof source === 'string') {
+      const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
+      if (/\.pptx?$/i.test(part)) return part;
+    }
+    if (source instanceof File && /\.pptx?$/i.test(source.name)) return source.name;
+    return 'presentation.pptx';
+  }
+
+  private slideErrorText(error: unknown): string {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Could not') || error.message.includes('.ppt') || error.message.includes('no slides'))
+    ) {
+      return error.message;
+    }
+    return 'Could not open this presentation.';
+  }
+
   private wordFileName(source: PdfSource): string {
     if (typeof source === 'string') {
       const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
@@ -3618,6 +3738,22 @@ export class PdfEditor extends LitElement {
     this.layoutWord();
   }
 
+  private async paintSlides(generation: number): Promise<void> {
+    if (!this.wordBytes) throw new Error('Could not open this presentation.');
+    const scratch = document.createElement('div');
+    const count = await renderSlidePages(this.wordBytes, scratch);
+    if (generation !== this.wordGeneration || this.documentKind !== 'slides') return;
+    const body = this.renderRoot.querySelector('.word-pages');
+    if (!(body instanceof HTMLElement)) throw new Error('Could not open this presentation.');
+    if (count < 1) throw new Error('This presentation has no slides to preview.');
+    body.replaceChildren(...scratch.childNodes);
+    this.totalPages = count;
+    this.currentPage = 1;
+    this.pageReady = true;
+    await this.updateComplete;
+    this.layoutWord();
+  }
+
   private layoutWord(): void {
     if (!this.isReadOnlyPreview()) return;
     const stage = this.renderRoot.querySelector('.word-stage');
@@ -3632,7 +3768,9 @@ export class PdfEditor extends LitElement {
       this.applyPreviewScale(stage, frame, host, image.naturalWidth, image.naturalHeight);
       return;
     }
-    const pages = [...host.querySelectorAll('section.docx')] as HTMLElement[];
+    const pages = [
+      ...(this.documentKind === 'slides' ? host.querySelectorAll('.preview-slide') : host.querySelectorAll('section.docx')),
+    ] as HTMLElement[];
     if (pages.length === 0) return;
     const index = Math.min(Math.max(this.currentPage, 1), pages.length) - 1;
     pages.forEach((page, pageIndex) => {
@@ -3739,6 +3877,8 @@ export class PdfEditor extends LitElement {
     const lower = name.toLowerCase();
     if (lower.endsWith('.png')) return 'image/png';
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+    if (lower.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    if (lower.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
     if (lower.endsWith('.doc') && !lower.endsWith('.docx')) return 'application/msword';
     return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   }
@@ -3822,11 +3962,19 @@ export class PdfEditor extends LitElement {
       html, body { margin: 0; background: #fff; }
       section.docx { break-after: page; box-shadow: none !important; margin: 0 auto !important; }
       img.preview-image { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+      .preview-slide { break-after: page; margin: 0 auto 12px !important; position: relative !important; }
     `;
     doc.head.append(style);
     if (this.documentKind === 'image') {
       const image = this.renderRoot.querySelector('img.preview-image');
       if (image) doc.body.append(doc.importNode(image, true));
+    } else if (this.documentKind === 'slides') {
+      const frameElement = doc.defaultView?.Element;
+      this.renderRoot.querySelectorAll('.word-pages .preview-slide').forEach((node) => {
+        const copy = this.clonePreviewNode(node, doc);
+        if (frameElement && copy instanceof frameElement) copy.removeAttribute('hidden');
+        doc.body.append(copy);
+      });
     } else {
       this.renderRoot.querySelectorAll('.word-pages style').forEach((node) => {
         doc.head.append(doc.importNode(node, true));
@@ -3848,6 +3996,21 @@ export class PdfEditor extends LitElement {
       frameWindow.focus();
       frameWindow.print();
     });
+  }
+
+  private clonePreviewNode(node: Element, doc: Document): Node {
+    const copy = doc.importNode(node, true);
+    if (!(node instanceof HTMLElement) || !(copy instanceof HTMLElement)) return copy;
+    const sources = [...node.querySelectorAll('canvas')];
+    const targets = [...copy.querySelectorAll('canvas')];
+    sources.forEach((source, index) => {
+      const target = targets[index];
+      if (!(target instanceof HTMLCanvasElement)) return;
+      target.width = source.width;
+      target.height = source.height;
+      target.getContext('2d')?.drawImage(source, 0, 0);
+    });
+    return copy;
   }
 
   private focusWordStage(event: PointerEvent): void {
@@ -3971,8 +4134,14 @@ export class PdfEditor extends LitElement {
 
   private previewStatus(): string {
     if (this.errorMessage) return this.errorMessage;
-    if (this.loading) return this.documentKind === 'image' ? 'Opening image…' : 'Opening document…';
-    return this.documentKind === 'image' ? 'Open an image to preview it.' : 'Open a Word document to preview it.';
+    if (this.loading) {
+      if (this.documentKind === 'image') return 'Opening image…';
+      if (this.documentKind === 'slides') return 'Opening presentation…';
+      return 'Opening document…';
+    }
+    if (this.documentKind === 'image') return 'Open an image to preview it.';
+    if (this.documentKind === 'slides') return 'Open a presentation to preview it.';
+    return 'Open a Word document to preview it.';
   }
 
   private get fileReady(): boolean {
@@ -4211,7 +4380,7 @@ export class PdfEditor extends LitElement {
                   ${this.previewStatus()}
                 </div>
               `}
-          ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, or image</div>` : null}
+          ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, or image</div>` : null}
         </div>
         <footer class="word-bar">
           <div class="word-page">
@@ -9358,10 +9527,10 @@ export class PdfEditor extends LitElement {
               ? null
               : html`
                   <div class="status ${this.errorMessage ? 'error' : ''}">
-                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF, Word document, or image to start viewing.')}
+                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF, Word document, presentation, or image to start viewing.')}
                   </div>
                 `}
-            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, or image</div>` : null}
+            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, or image</div>` : null}
           </div>
           ${this.commentsOpen
             ? html`
