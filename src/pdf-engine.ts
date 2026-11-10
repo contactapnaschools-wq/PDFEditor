@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage, type RGB } from 'pdf-lib';
+import { PDFDocument, StandardFonts, degrees, rgb, type PDFFont, type PDFPage, type RGB } from 'pdf-lib';
 import {
   getDocument,
   GlobalWorkerOptions,
@@ -41,6 +41,54 @@ export async function openDocument(source: Uint8Array | string): Promise<PDFDocu
       ? getDocument({ url: source, ...shared })
       : getDocument({ data: source, ...shared });
   return task.promise;
+}
+
+export interface OutlineEntry {
+  id: string;
+  title: string;
+  page: number | null;
+  url: string | null;
+  items: OutlineEntry[];
+}
+
+interface RawOutline {
+  title?: string;
+  dest?: string | unknown[] | null;
+  url?: string | null;
+  items?: RawOutline[];
+}
+
+/** The document's built-in contents, with each entry resolved to a page when it has one. */
+export async function readOutline(pdf: PDFDocumentProxy): Promise<OutlineEntry[]> {
+  const root = await pdf.getOutline();
+  if (!root?.length) return [];
+  const walk = async (nodes: RawOutline[], prefix: string): Promise<OutlineEntry[]> => {
+    const entries: OutlineEntry[] = [];
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      const id = `${prefix}${index}`;
+      entries.push({
+        id,
+        title: node.title?.trim() || 'Untitled',
+        page: await outlinePage(pdf, node.dest),
+        url: typeof node.url === 'string' ? node.url : null,
+        items: await walk(node.items ?? [], `${id}-`),
+      });
+    }
+    return entries;
+  };
+  return walk(root as RawOutline[], '');
+}
+
+async function outlinePage(pdf: PDFDocumentProxy, dest: string | unknown[] | null | undefined): Promise<number | null> {
+  try {
+    const resolved = typeof dest === 'string' ? await pdf.getDestination(dest) : dest;
+    if (!Array.isArray(resolved) || resolved[0] == null) return null;
+    const index = await pdf.getPageIndex(resolved[0] as never);
+    return Number.isFinite(index) ? index + 1 : null;
+  } catch {
+    return null;
+  }
 }
 
 function turnedRotation(pageRotate: number, quarterTurns: number): number {
@@ -597,6 +645,76 @@ function drawCenteredText(page: PDFPage, font: PDFFont, text: string, x: number,
   if (!text) return;
   const width = font.widthOfTextAtSize(text.split('\n')[0] ?? '', size);
   page.drawText(text, { x: x - width / 2, y: y - size / 2, size, font, color, lineHeight: size * 1.2 });
+}
+
+/** Quarter turns are clockwise. Rotation is stored on each page. */
+export async function rotateDocumentPages(bytes: Uint8Array, pages: number[], quarterTurns: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const delta = (((quarterTurns % 4) + 4) % 4) * 90;
+  const count = doc.getPageCount();
+  for (const pageNumber of pages) {
+    if (pageNumber < 1 || pageNumber > count) continue;
+    const page = doc.getPage(pageNumber - 1);
+    page.setRotation(degrees((page.getRotation().angle + delta) % 360));
+  }
+  return doc.save();
+}
+
+/** `order` is the 1-based page numbers that should remain, in their new sequence. */
+export async function rebuildPages(bytes: Uint8Array, order: number[]): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const count = doc.getPageCount();
+  if (order.length < 1) throw new Error('Keep at least one page in the document.');
+  if (order.some((page) => page < 1 || page > count)) throw new Error('That page is not in this document.');
+  const next = await PDFDocument.create();
+  const copied = await next.copyPages(doc, order.map((page) => page - 1));
+  copied.forEach((page) => next.addPage(page));
+  return next.save();
+}
+
+export async function insertBlankPage(bytes: Uint8Array, afterPage: number): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const count = doc.getPageCount();
+  const after = Math.min(Math.max(afterPage, 0), count);
+  const reference = doc.getPage(Math.min(Math.max(after, 1), count) - 1);
+  const { width, height } = reference.getSize();
+  doc.insertPage(after, [width, height]);
+  return doc.save();
+}
+
+export async function deleteDocumentPages(bytes: Uint8Array, pages: number[]): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const count = doc.getPageCount();
+  const drop = [...new Set(pages)].filter((page) => page >= 1 && page <= count).sort((a, b) => b - a);
+  if (drop.length < 1) return doc.save();
+  if (drop.length >= count) throw new Error('Keep at least one page in the document.');
+  for (const page of drop) doc.removePage(page - 1);
+  return doc.save();
+}
+
+/** Replaces one page with the first page of another PDF. */
+export async function replaceDocumentPage(bytes: Uint8Array, pageNumber: number, source: Uint8Array): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const incoming = await PDFDocument.load(source);
+  if (incoming.getPageCount() < 1) throw new Error('That PDF has no pages.');
+  if (pageNumber < 1 || pageNumber > doc.getPageCount()) throw new Error('That page is not in this document.');
+  const [page] = await doc.copyPages(incoming, [0]);
+  const index = pageNumber - 1;
+  doc.removePage(index);
+  doc.insertPage(index, page);
+  return doc.save();
+}
+
+/** A new PDF containing the requested pages, in the order given. */
+export async function extractDocumentPages(bytes: Uint8Array, pages: number[]): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const count = doc.getPageCount();
+  const order = pages.filter((page) => page >= 1 && page <= count);
+  if (!order.length) throw new Error('Choose a page to save.');
+  const next = await PDFDocument.create();
+  const copied = await next.copyPages(doc, order.map((page) => page - 1));
+  copied.forEach((page) => next.addPage(page));
+  return next.save();
 }
 
 function drawBoxedText(page: PDFPage, font: PDFFont, text: string, x: number, top: number, size: number, color: RGB, border: RGB): void {

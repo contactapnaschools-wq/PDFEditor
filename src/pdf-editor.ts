@@ -27,18 +27,26 @@ import {
   isRenderCancel,
   openDocument,
   pageSizeAtScale1,
+  readOutline,
   pageTextLines,
+  deleteDocumentPages,
+  extractDocumentPages,
+  insertBlankPage,
   pageFormFields,
   pageWordRects,
   paintPage,
   pdfRectFromPoints,
   projectRect,
+  rebuildPages,
   rectsIntersect,
+  replaceDocumentPage,
   replaceLineText,
+  rotateDocumentPages,
   setTextField,
   toggleCheckBox,
   viewportToPdf,
   type DrawnMark,
+  type OutlineEntry,
   type PdfRect,
   type TextMatch,
   type TextRun,
@@ -136,6 +144,12 @@ interface TextEdit {
   text: string;
   baseline: number;
   fontSize: number;
+}
+
+interface PageBookmark {
+  id: string;
+  page: number;
+  title: string;
 }
 
 interface EditDraft {
@@ -370,6 +384,124 @@ function iconPreviewSettings(): SVGTemplateResult {
   `;
 }
 
+function iconPaneThumbs(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7">
+      <rect x="4" y="4" width="7" height="7" rx="1.2"></rect>
+      <rect x="13" y="4" width="7" height="7" rx="1.2"></rect>
+      <rect x="4" y="13" width="7" height="7" rx="1.2"></rect>
+      <rect x="13" y="13" width="7" height="7" rx="1.2"></rect>
+    </svg>
+  `;
+}
+
+function iconPaneOutline(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+      <path d="M8 7h11M8 12h11M8 17h11"></path>
+      <path d="M4.5 7h.01M4.5 12h.01M4.5 17h.01"></path>
+    </svg>
+  `;
+}
+
+function iconPaneBookmark(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+      <path d="M7 4.5h10V20l-5-3.2L7 20z"></path>
+    </svg>
+  `;
+}
+
+function iconPaneLayers(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+      <path d="M12 4.5 20 8.5 12 12.5 4 8.5z"></path>
+      <path d="M4 12.2 12 16.2 20 12.2"></path>
+      <path d="M4 15.6 12 19.6 20 15.6"></path>
+    </svg>
+  `;
+}
+
+function iconPaneClip(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M15.5 7.5 8.2 14.8a3 3 0 0 0 4.2 4.2l8-8a4.2 4.2 0 0 0-6-6L6.6 12.8a5.2 5.2 0 0 0 7.4 7.4l6.2-6.2"></path>
+    </svg>
+  `;
+}
+
+function iconTurnLeft(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M8 8H4.5V4.5"></path>
+      <path d="M5 8a7 7 0 1 1-1.2 4"></path>
+    </svg>
+  `;
+}
+
+function iconTurnRight(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M16 8h3.5V4.5"></path>
+      <path d="M19 8a7 7 0 1 0 1.2 4"></path>
+    </svg>
+  `;
+}
+
+function iconMoveUp(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 19V6"></path>
+      <path d="M7 10.5 12 5.5l5 5"></path>
+    </svg>
+  `;
+}
+
+function iconMoveDown(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 5v13"></path>
+      <path d="M7 13.5 12 18.5l5-5"></path>
+    </svg>
+  `;
+}
+
+function iconTrash(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M5 7.5h14"></path>
+      <path d="M9 7.5V5.8h6V7.5"></path>
+      <path d="M7.5 7.5 8.2 19h7.6l.7-11.5"></path>
+    </svg>
+  `;
+}
+
+function iconMore(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+      <circle cx="6" cy="12" r="1.4"></circle>
+      <circle cx="12" cy="12" r="1.4"></circle>
+      <circle cx="18" cy="12" r="1.4"></circle>
+    </svg>
+  `;
+}
+
+function iconPaneCheck(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 12.5 10 16.5 18 8"></path>
+    </svg>
+  `;
+}
+
+function iconPaneClear(): SVGTemplateResult {
+  return svg`
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+      <path d="M7 7l10 10M17 7 7 17"></path>
+    </svg>
+  `;
+}
+
 interface PreviewSavePicker {
   showSaveFilePicker?: (options: {
     suggestedName?: string;
@@ -383,6 +515,8 @@ interface PreviewSavePicker {
 type SettingsSection = 'theme' | 'shortcuts' | 'advanced';
 type ViewRead = 'page' | 'scroll';
 type ViewSpread = 'single' | 'pair' | 'cover';
+type PagePaneTab = 'thumbs' | 'outline' | 'bookmarks' | 'layers' | 'files';
+type PageMove = 'start' | 'end' | 'up' | 'down';
 
 const SETTINGS_SHORTCUTS: ReadonlyArray<{ keys: string; description: string; scope: 'all' | 'pdf' | 'preview' }> = [
   { keys: 'Ctrl + O', description: 'Open a file', scope: 'all' },
@@ -601,6 +735,26 @@ export class PdfEditor extends LitElement {
     }
     .page-frame.is-hidden { display: none; }
     .page-canvas { display: block; }
+    .page-bookmark {
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      z-index: 8;
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: none;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.94);
+      color: #5f6368;
+      cursor: pointer;
+      box-shadow: 0 1px 3px rgba(60, 64, 67, 0.28);
+    }
+    .page-bookmark.marked { color: #1a73e8; }
+    .page-bookmark:hover { background: #fff; }
+    .page-bookmark svg { width: 16px; height: 16px; display: block; }
 
     .highlights {
       position: absolute;
@@ -1427,14 +1581,319 @@ export class PdfEditor extends LitElement {
     }
 
     .pages {
-      width: 168px;
+      position: relative;
+      width: 248px;
       flex: none;
       min-height: 0;
-      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
       background: #f8f9fa;
       border-right: 1px solid #e0e3e7;
-      padding: 12px 10px 24px;
     }
+    .pane-tabs {
+      display: flex;
+      gap: 2px;
+      flex: none;
+      padding: 8px 8px 0;
+      border-bottom: 1px solid #e0e3e7;
+      background: #fff;
+    }
+    .pane-tabs button {
+      display: grid;
+      place-items: center;
+      width: 36px;
+      height: 34px;
+      border: none;
+      border-bottom: 2px solid transparent;
+      border-radius: 8px 8px 0 0;
+      background: transparent;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .pane-tabs button:hover { background: #f1f3f4; color: #202124; }
+    .pane-tabs button:focus-visible { outline: 2px solid #1a73e8; outline-offset: -2px; }
+    .pane-tabs button[aria-selected='true'] {
+      background: #e8f0fe;
+      color: #1a73e8;
+      border-bottom-color: #1a73e8;
+    }
+    .pane-tabs svg { width: 18px; height: 18px; display: block; }
+    .pane-size {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex: none;
+      padding: 8px 10px 2px;
+    }
+    .pane-size button {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .pane-size button:hover { background: #e8eaed; }
+    .pane-size svg { width: 16px; height: 16px; display: block; }
+    .pane-size input[type='range'] {
+      flex: 1;
+      min-width: 0;
+      accent-color: #1a73e8;
+    }
+    .pane-list {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 8px 10px 16px;
+    }
+    .pane-soon {
+      flex: 1;
+      padding: 28px 18px;
+      text-align: center;
+    }
+    .pane-soon h2 {
+      margin: 0 0 6px;
+      font-size: 15px;
+      font-weight: 650;
+    }
+    .pane-soon p {
+      margin: 0;
+      color: #80868b;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .pane-section-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex: none;
+      padding: 12px 12px 4px;
+    }
+    .pane-section-head h2 { margin: 0; font-size: 15px; font-weight: 650; }
+    .pane-section-head button,
+    .pane-add {
+      border: none;
+      background: transparent;
+      color: #1a73e8;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .pane-section-head button:hover,
+    .pane-add:hover { text-decoration: underline; }
+    .pane-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: none;
+      margin: 8px 12px 0;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #e0e3e7;
+      color: #202124;
+      font-size: 13px;
+    }
+    .outline-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 2px;
+      width: 100%;
+    }
+    .outline-twist {
+      width: 18px;
+      height: 28px;
+      flex: none;
+      border: none;
+      background: transparent;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .outline-link,
+    .bookmark-main {
+      flex: 1;
+      min-width: 0;
+      border: none;
+      background: transparent;
+      text-align: left;
+      cursor: pointer;
+      color: #202124;
+      font: inherit;
+    }
+    .outline-link {
+      padding: 6px 4px;
+      border-radius: 6px;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .outline-link:hover:not(:disabled),
+    .bookmark-main:hover { background: #e8f0fe; }
+    .outline-link:disabled { color: #80868b; cursor: default; }
+    .outline-link[aria-current='page'] { color: #1a73e8; font-weight: 650; }
+    .bookmark-row { display: flex; align-items: flex-start; gap: 4px; }
+    .bookmark-main {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      padding: 6px 6px;
+      border-radius: 8px;
+    }
+    .bookmark-page { color: #80868b; font-size: 11px; font-weight: 650; }
+    .bookmark-title { font-size: 13px; }
+    .bookmark-empty { margin: 22px 8px; color: #80868b; font-size: 13px; text-align: center; }
+    .bookmark-remove {
+      width: 28px;
+      height: 28px;
+      flex: none;
+      margin-top: 8px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #d93025;
+      cursor: pointer;
+    }
+    .bookmark-remove:hover { background: #fdecea; }
+    .bookmark-remove svg { width: 16px; height: 16px; display: block; }
+    .bookmark-form {
+      margin: 4px 2px 12px;
+      padding: 12px;
+      border-radius: 10px;
+      background: #f1f3f4;
+    }
+    .bookmark-form p { margin: 0 0 8px; text-align: center; font-size: 13px; font-weight: 650; }
+    .bookmark-form input {
+      width: 100%;
+      height: 34px;
+      border: 1px solid #1a73e8;
+      border-radius: 6px;
+      padding: 0 8px;
+      background: #fff;
+      color: #202124;
+      font: inherit;
+      font-size: 13px;
+    }
+    .bookmark-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+    .bookmark-form-actions button {
+      height: 32px;
+      padding: 0 12px;
+      border: none;
+      border-radius: 6px;
+      background: transparent;
+      color: #1a73e8;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    .bookmark-form-actions .primary { background: #1a73e8; color: #fff; }
+    .bookmark-form-actions .primary:disabled { background: #e8eaed; color: #80868b; cursor: default; }
+    .pane-add {
+      flex: none;
+      height: 44px;
+      border-top: 1px solid #e0e3e7;
+      background: #fff;
+    }
+    .pick-bar {
+      display: flex;
+      justify-content: center;
+      gap: 2px;
+      flex: none;
+      margin: 0 10px 8px;
+      padding: 4px;
+      border-radius: 10px;
+      background: #e8eaed;
+    }
+    .pick-bar button {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #3c4043;
+      cursor: pointer;
+    }
+    .pick-bar button:hover:not(:disabled) { background: #fff; }
+    .pick-bar button:disabled { color: #bdc1c6; cursor: default; }
+    .pick-bar svg { width: 16px; height: 16px; display: block; }
+    .pane-foot {
+      flex: none;
+      padding: 8px 12px 12px;
+      border-top: 1px solid #e0e3e7;
+      background: #fff;
+    }
+    .pane-foot p {
+      margin: 0 0 6px;
+      color: #5f6368;
+      font-size: 12px;
+      text-align: center;
+    }
+    .pane-note {
+      margin: 0 0 6px;
+      color: #d93025;
+      font-size: 12px;
+      text-align: center;
+    }
+    .pane-foot-row { display: flex; gap: 6px; }
+    .pane-foot input {
+      flex: 1;
+      min-width: 0;
+      height: 32px;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      padding: 0 10px;
+      background: #fff;
+      color: #202124;
+      font: inherit;
+      font-size: 13px;
+    }
+    .pane-foot button {
+      display: grid;
+      place-items: center;
+      width: 32px;
+      height: 32px;
+      flex: none;
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      background: #fff;
+      color: #1a73e8;
+      cursor: pointer;
+    }
+    .pane-foot button:hover { background: #e8f0fe; }
+    .pane-foot svg { width: 16px; height: 16px; display: block; }
+    .page-ops {
+      flex: none;
+      z-index: 2;
+      margin: 0 8px 8px;
+      max-height: 240px;
+      overflow: auto;
+      padding: 4px 0;
+      border: 1px solid #e0e3e7;
+      border-radius: 10px;
+      background: #fff;
+      box-shadow: 0 8px 24px rgba(60, 64, 67, 0.18);
+    }
+    .page-ops .view-heading { padding: 6px 12px 2px; }
+    .page-ops button {
+      display: block;
+      width: 100%;
+      height: 32px;
+      padding: 0 12px;
+      border: none;
+      background: transparent;
+      color: #202124;
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .page-ops button:hover:not(:disabled) { background: #f1f3f4; }
+    .page-ops button:disabled { color: #bdc1c6; cursor: default; }
+    .page-ops button.danger { color: #d93025; }
+    .page-ops .rule { height: 1px; margin: 4px 0; background: #e0e3e7; }
     .style-panel {
       width: 252px;
       flex: none;
@@ -1571,13 +2030,13 @@ export class PdfEditor extends LitElement {
       font-size: 12px;
       text-align: center;
     }
+    .thumb-card { margin: 0 0 12px; }
     .thumb {
       display: flex;
       flex-direction: column;
       align-items: center;
       gap: 6px;
       width: 100%;
-      margin: 0 0 14px;
       padding: 0;
       border: none;
       background: transparent;
@@ -1586,15 +2045,52 @@ export class PdfEditor extends LitElement {
       cursor: pointer;
     }
     .thumb-frame {
-      width: 120px;
       background: #fff;
       line-height: 0;
       box-shadow: 0 0 0 1px rgba(60, 64, 67, 0.18);
     }
-    .thumb[aria-current='page'] .thumb-frame {
+    .thumb[aria-current='page'] .thumb-frame,
+    .thumb-card.picked .thumb-frame {
       box-shadow: 0 0 0 2px #1a73e8;
     }
-    .thumb canvas { display: block; max-width: 120px; height: auto; }
+    .thumb[aria-current='page'] .thumb-num { color: #1a73e8; font-weight: 700; }
+    .thumb-card.picked .thumb-num::before {
+      content: "";
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      margin-right: 5px;
+      border-radius: 50%;
+      background: #1a73e8;
+      vertical-align: 1px;
+    }
+    .thumb canvas { display: block; height: auto; }
+    .thumb-actions {
+      display: none;
+      justify-content: center;
+      gap: 2px;
+      margin-top: 4px;
+    }
+    .thumb-card:hover .thumb-actions,
+    .thumb-card.current .thumb-actions,
+    .thumb-card.picked .thumb-actions,
+    .thumb-card.menu .thumb-actions { display: flex; }
+    .thumb-actions button {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: none;
+      border-radius: 8px;
+      background: transparent;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .thumb-actions button:hover:not(:disabled) { background: #e8eaed; }
+    .thumb-actions button:disabled { color: #bdc1c6; cursor: default; }
+    .thumb-actions .danger { color: #d93025; }
+    .thumb-actions .danger:hover:not(:disabled) { background: #fdecea; }
+    .thumb-actions svg { width: 16px; height: 16px; display: block; }
 
     .status {
       position: absolute;
@@ -1979,8 +2475,56 @@ export class PdfEditor extends LitElement {
       color: #e8eaed;
     }
     .preview-dark .viewer,
-    .preview-dark .pages { background: #202124; }
-    .preview-dark .pages { border-right-color: #3c4043; }
+    .preview-dark .pages { background: #202124; border-right-color: #3c4043; }
+    .preview-dark .pane-tabs,
+    .preview-dark .pane-foot,
+    .preview-dark .page-ops { background: #292a2d; border-color: #3c4043; color: #e8eaed; }
+    .preview-dark .pane-tabs { border-bottom-color: #3c4043; }
+    .preview-dark .pane-tabs button { color: #9aa0a6; }
+    .preview-dark .pane-tabs button:hover { background: #3c4043; color: #e8eaed; }
+    .preview-dark .pane-tabs button[aria-selected='true'] { background: #174ea6; color: #fff; }
+    .preview-dark .pane-size button,
+    .preview-dark .thumb-actions button,
+    .preview-dark .pick-bar button { color: #e8eaed; }
+    .preview-dark .pane-size button:hover,
+    .preview-dark .thumb-actions button:hover:not(:disabled) { background: #3c4043; }
+    .preview-dark .pick-bar { background: #3c4043; }
+    .preview-dark .pick-bar button:hover:not(:disabled) { background: #202124; }
+    .preview-dark .pane-foot { border-top-color: #3c4043; }
+    .preview-dark .pane-foot p,
+    .preview-dark .pane-soon p,
+    .preview-dark .bookmark-empty,
+    .preview-dark .bookmark-page,
+    .preview-dark .thumb { color: #9aa0a6; }
+    .preview-dark .pane-section-head h2,
+    .preview-dark .pane-toggle,
+    .preview-dark .outline-link,
+    .preview-dark .bookmark-title { color: #e8eaed; }
+    .preview-dark .outline-link:hover:not(:disabled),
+    .preview-dark .bookmark-main:hover { background: #3c4043; }
+    .preview-dark .outline-link[aria-current='page'] { color: #8ab4f8; }
+    .preview-dark .pane-toggle,
+    .preview-dark .pane-add { border-color: #3c4043; }
+    .preview-dark .pane-add,
+    .preview-dark .bookmark-form { background: #292a2d; }
+    .preview-dark .bookmark-form input {
+      background: #202124;
+      border-color: #8ab4f8;
+      color: #e8eaed;
+    }
+    .preview-dark .page-bookmark { background: rgba(32, 33, 36, 0.92); color: #e8eaed; }
+    .preview-dark .page-bookmark.marked { color: #8ab4f8; }
+    .preview-dark .pane-foot input {
+      background: #202124;
+      border-color: #3c4043;
+      color: #e8eaed;
+    }
+    .preview-dark .pane-foot button { background: #202124; border-color: #3c4043; }
+    .preview-dark .page-ops button { color: #e8eaed; }
+    .preview-dark .page-ops button:hover:not(:disabled) { background: #3c4043; }
+    .preview-dark .page-ops button.danger { color: #f28b82; }
+    .preview-dark .page-ops .rule { background: #3c4043; }
+    .preview-dark .thumb-frame { background: #fff; }
     .preview-dark .style-panel {
       background: #292a2d;
       border-right-color: #3c4043;
@@ -2405,6 +2949,19 @@ export class PdfEditor extends LitElement {
   @state() private searchOpen = false;
   @state() private commentsOpen = true;
   @state() private pagesPressed = false;
+  @state() private pageTab: PagePaneTab = 'thumbs';
+  @state() private thumbWidth = 112;
+  @state() private pagePicks: number[] = [];
+  @state() private pageListDraft = '';
+  @state() private pageNote = '';
+  @state() private pageMenu: { page: number; scope: 'one' | 'many' } | null = null;
+  @state() private pageBusy = false;
+  @state() private outlineItems: OutlineEntry[] = [];
+  @state() private outlineOpen: string[] = [];
+  @state() private pageBookmarks: PageBookmark[] = [];
+  @state() private showBookmarksOnPage = false;
+  @state() private bookmarkEditing = false;
+  @state() private bookmarkDraft: { page: number; title: string } | null = null;
   @state() private dragOver = false;
   @state() private panning = false;
   @state() private findQuery = '';
@@ -2466,7 +3023,7 @@ export class PdfEditor extends LitElement {
   @query('.zoom-root') private zoomRoot!: HTMLElement;
   @query('.search-root') private searchRoot!: HTMLElement;
   @query('.view-root') private viewRoot!: HTMLElement;
-  @query('.pages') private pagesEl!: HTMLElement;
+  @query('.pane-list') private pageListEl!: HTMLElement | null;
 
   private pdf: PDFDocumentProxy | null = null;
   private renderTask: RenderTask | null = null;
@@ -2503,6 +3060,7 @@ export class PdfEditor extends LitElement {
   private thumbsPainted = new Set<number>();
   private thumbsPending = new Set<number>();
   private thumbToken = 0;
+  private outlineToken = 0;
 
   /** 1-based page currently shown. */
   get page(): number {
@@ -2594,7 +3152,7 @@ export class PdfEditor extends LitElement {
     ) {
       this.scheduleRender();
     }
-    if (changed.has('pagesPressed') || changed.has('totalPages')) {
+    if (changed.has('pagesPressed') || changed.has('totalPages') || changed.has('thumbWidth') || (changed.has('pageTab') && this.pageTab === 'thumbs')) {
       this.thumbsPainted.clear();
       this.thumbsPending.clear();
       this.cancelThumbnails();
@@ -2726,6 +3284,14 @@ export class PdfEditor extends LitElement {
       this.downloadName = this.fileName(source);
       this.totalPages = opened.numPages;
       this.currentPage = 1;
+      this.pagePicks = [];
+      this.pageListDraft = '';
+      this.pageNote = '';
+      this.pageMenu = null;
+      this.pageBookmarks = [];
+      this.bookmarkDraft = null;
+      this.bookmarkEditing = false;
+      void this.refreshOutline();
       this.loading = false;
       this.resetScroll = true;
       this.dispatchEvent(
@@ -3892,10 +4458,12 @@ export class PdfEditor extends LitElement {
     this.pdf = opened;
     await previous?.loadingTask.destroy();
     this.textRunCache.clear();
+    this.cancelThumbnails();
     this.thumbsPainted.clear();
     this.thumbsPending.clear();
     this.scheduleRender();
     if (this.findQuery.trim()) this.queueSearch();
+    void this.refreshOutline();
   }
 
   private async readSource(source: PdfSource): Promise<Uint8Array | string> {
@@ -4282,8 +4850,8 @@ export class PdfEditor extends LitElement {
   }
 
   private observeThumbnails(): void {
-    const root = this.pagesEl;
-    if (!this.pagesPressed || !root || !this.pdf) return;
+    const root = this.pageListEl;
+    if (!this.pagesPressed || this.pageTab !== 'thumbs' || !root || !this.pdf) return;
     this.thumbObserver?.disconnect();
     this.thumbObserver = new IntersectionObserver(
       (entries) => {
@@ -4309,7 +4877,7 @@ export class PdfEditor extends LitElement {
     try {
       const size = await pageSizeAtScale1(pdf, pageNumber, this.viewTurn);
       if (token !== this.thumbToken || this.pdf !== pdf) return;
-      const task = await paintPage(pdf, pageNumber, canvas, 120 / size.width, this.viewTurn);
+      const task = await paintPage(pdf, pageNumber, canvas, this.thumbWidth / size.width, this.viewTurn);
       if (token !== this.thumbToken || this.pdf !== pdf) {
         task.cancel();
         return;
@@ -4327,7 +4895,7 @@ export class PdfEditor extends LitElement {
   }
 
   private scrollActiveThumb(): void {
-    this.pagesEl?.querySelector('.thumb[aria-current="page"]')?.scrollIntoView({ block: 'nearest' });
+    this.pageListEl?.querySelector('.thumb[aria-current="page"]')?.scrollIntoView({ block: 'nearest' });
   }
 
   private chooseFile(): void {
@@ -4367,6 +4935,11 @@ export class PdfEditor extends LitElement {
       }
       if (this.commentMenuId || this.statusMenuId) {
         this.closeCommentMenus();
+        event.preventDefault();
+        return;
+      }
+      if (this.pageMenu) {
+        this.pageMenu = null;
         event.preventDefault();
         return;
       }
@@ -4428,6 +5001,14 @@ export class PdfEditor extends LitElement {
     if (this.zoomOpen && this.zoomRoot && !path.includes(this.zoomRoot)) this.zoomOpen = false;
     if (this.searchOpen && this.searchRoot && !path.includes(this.searchRoot)) this.searchOpen = false;
     if (this.viewMenuOpen && this.viewRoot && !path.includes(this.viewRoot)) this.viewMenuOpen = false;
+    if (this.pageMenu) {
+      const inside = path.some(
+        (node) =>
+          node instanceof HTMLElement &&
+          (node.classList.contains('page-ops') || node.classList.contains('thumb-more') || node.classList.contains('pick-more')),
+      );
+      if (!inside) this.pageMenu = null;
+    }
     if (this.commentMenuId || this.statusMenuId) {
       const inside = path.some(
         (node) => node instanceof HTMLElement && (node.classList.contains('comment-menu') || node.classList.contains('comment-menu-btn')),
@@ -7206,27 +7787,654 @@ export class PdfEditor extends LitElement {
     return `${this.matchIndex + 1} of ${this.matchCount}`;
   }
 
-  private get pagesPanel() {
-    if (!this.pagesPressed) return null;
-    const pages = Array.from({ length: this.totalPages }, (_, index) => index + 1);
+  private cleanPages(pages: number[]): number[] {
+    return [...new Set(pages.filter((page) => page >= 1 && page <= this.totalPages))].sort((a, b) => a - b);
+  }
+
+  private identityPages(): Map<number, number> {
+    const mapping = new Map<number, number>();
+    for (let page = 1; page <= this.totalPages; page += 1) mapping.set(page, page);
+    return mapping;
+  }
+
+  private parsePageList(value: string): { pages: number[]; skipped: boolean } {
+    const pages = new Set<number>();
+    let skipped = false;
+    for (const part of value.split(',')) {
+      const piece = part.trim();
+      if (!piece) continue;
+      const range = /^(\d+)\s*-\s*(\d+)$/.exec(piece);
+      if (range) {
+        let start = Number(range[1]);
+        let end = Number(range[2]);
+        if (start > end) [start, end] = [end, start];
+        if (end - start > 5000) {
+          skipped = true;
+          continue;
+        }
+        for (let page = start; page <= end; page += 1) {
+          if (page >= 1 && page <= this.totalPages) pages.add(page);
+          else skipped = true;
+        }
+        continue;
+      }
+      if (!/^\d+$/.test(piece)) {
+        skipped = true;
+        continue;
+      }
+      const page = Number(piece);
+      if (page >= 1 && page <= this.totalPages) pages.add(page);
+      else skipped = true;
+    }
+    return { pages: [...pages].sort((a, b) => a - b), skipped };
+  }
+
+  private applyPageList(): void {
+    const { pages, skipped } = this.parsePageList(this.pageListDraft);
+    if (!this.pageListDraft.trim() || pages.length === 0) {
+      this.pagePicks = [];
+      this.pageNote = this.pageListDraft.trim() ? 'Use page numbers such as 1, 3, 5-10.' : '';
+      return;
+    }
+    this.pagePicks = pages;
+    this.pageNote = skipped ? 'Some numbers are outside this document.' : '';
+    this.pageMenu = null;
+    this.goToPage(pages[0]);
+  }
+
+  private clearPagePicks(): void {
+    this.pagePicks = [];
+    this.pageListDraft = '';
+    this.pageNote = '';
+    this.pageMenu = null;
+  }
+
+  private setThumbWidth(next: number): void {
+    const width = Math.min(200, Math.max(72, Math.round(next)));
+    if (width !== this.thumbWidth) this.thumbWidth = width;
+  }
+
+  private togglePageMenu(page: number, scope: 'one' | 'many'): void {
+    if (this.pageMenu?.page === page && this.pageMenu.scope === scope) this.pageMenu = null;
+    else this.pageMenu = { page, scope };
+  }
+
+  private menuPages(): number[] {
+    if (!this.pageMenu) return [];
+    if (this.pageMenu.scope === 'many') return this.cleanPages(this.pagePicks);
+    return this.cleanPages([this.pageMenu.page]);
+  }
+
+  private orderFor(selected: number[], where: PageMove): number[] {
+    const all = Array.from({ length: this.totalPages }, (_, index) => index + 1);
+    const chosen = new Set(selected);
+    const rest = all.filter((page) => !chosen.has(page));
+    if (where === 'start') return [...selected, ...rest];
+    if (where === 'end') return [...rest, ...selected];
+    const first = selected[0];
+    const last = selected[selected.length - 1];
+    if (where === 'up') {
+      if (first <= 1) return all;
+      const before = rest.filter((page) => page < first);
+      const after = rest.filter((page) => page > first);
+      return [...before.slice(0, -1), ...selected, before[before.length - 1], ...after];
+    }
+    if (last >= this.totalPages) return all;
+    const before = rest.filter((page) => page < last);
+    const after = rest.filter((page) => page > last);
+    return [...before, after[0], ...selected, ...after.slice(1)];
+  }
+
+  private async commitPages(bytes: Uint8Array, mapping: Map<number, number>, nextPage: number): Promise<void> {
+    const hadPicks = this.pagePicks.length > 0;
+    this.pdfBytes = new Uint8Array(bytes);
+    this.marks = this.marks.flatMap((mark) => {
+      const page = mapping.get(mark.page);
+      return page ? [{ ...mark, page }] : [];
+    });
+    this.textEdits = this.textEdits.flatMap((edit) => {
+      const page = mapping.get(edit.page);
+      return page ? [{ ...edit, page }] : [];
+    });
+    this.pageBookmarks = this.pageBookmarks.flatMap((item) => {
+      const page = mapping.get(item.page);
+      return page ? [{ ...item, page }] : [];
+    });
+    if (this.bookmarkDraft) {
+      const page = mapping.get(this.bookmarkDraft.page);
+      this.bookmarkDraft = page ? { ...this.bookmarkDraft, page } : null;
+    }
+    this.pagePicks = [...new Set(this.pagePicks.flatMap((page) => {
+      const next = mapping.get(page);
+      return next ? [next] : [];
+    }))].sort((a, b) => a - b);
+    if (hadPicks) this.pageListDraft = this.pagePicks.join(', ');
+    await this.swapDocument(this.pdfBytes);
+    this.totalPages = this.pdf?.numPages ?? 0;
+    const focus = Math.min(Math.max(nextPage, 1), Math.max(this.totalPages, 1));
+    if (focus !== this.currentPage) this.goToPage(focus);
+    void this.updateComplete.then(() => this.observeThumbnails());
+  }
+
+  private async runPageEdit(work: () => Promise<void>, fallback: string): Promise<void> {
+    if (this.pageBusy || !this.pdf) return;
+    this.pageBusy = true;
+    this.pageMenu = null;
+    try {
+      await work();
+      this.pageNote = '';
+    } catch (error) {
+      this.reportError(fallback, error);
+    } finally {
+      this.pageBusy = false;
+    }
+  }
+
+  private async turnPages(pages: number[], direction: 1 | -1): Promise<void> {
+    const selected = this.cleanPages(pages);
+    if (!selected.length) return;
+    await this.runPageEdit(async () => {
+      const bytes = await rotateDocumentPages(await this.ensureBytes(), selected, direction);
+      await this.commitPages(bytes, this.identityPages(), this.currentPage);
+    }, 'Could not turn those pages.');
+  }
+
+  private async movePages(pages: number[], where: PageMove): Promise<void> {
+    const selected = this.cleanPages(pages);
+    if (!selected.length) return;
+    const order = this.orderFor(selected, where);
+    if (order.every((page, index) => page === index + 1)) {
+      this.pageMenu = null;
+      return;
+    }
+    const mapping = new Map<number, number>();
+    order.forEach((page, index) => mapping.set(page, index + 1));
+    await this.runPageEdit(async () => {
+      const bytes = await rebuildPages(await this.ensureBytes(), order);
+      await this.commitPages(bytes, mapping, mapping.get(this.currentPage) ?? 1);
+    }, 'Could not move those pages.');
+  }
+
+  private async removePages(pages: number[]): Promise<void> {
+    const selected = this.cleanPages(pages);
+    if (!selected.length) return;
+    if (selected.length >= this.totalPages) {
+      this.pageMenu = null;
+      this.pageNote = 'Keep at least one page in the document.';
+      return;
+    }
+    const drop = new Set(selected);
+    const mapping = new Map<number, number>();
+    let next = 1;
+    for (let page = 1; page <= this.totalPages; page += 1) {
+      if (!drop.has(page)) mapping.set(page, next++);
+    }
+    let focus = mapping.get(this.currentPage) ?? 0;
+    if (!focus) {
+      const following = Array.from({ length: this.totalPages }, (_, index) => index + 1).find((page) => page > this.currentPage && mapping.has(page));
+      const prior = Array.from({ length: this.currentPage - 1 }, (_, index) => this.currentPage - 1 - index).find((page) => mapping.has(page));
+      focus = (following ? mapping.get(following) : undefined) ?? (prior ? mapping.get(prior) : undefined) ?? 1;
+    }
+    await this.runPageEdit(async () => {
+      const bytes = await deleteDocumentPages(await this.ensureBytes(), selected);
+      await this.commitPages(bytes, mapping, focus);
+    }, 'Could not remove those pages.');
+  }
+
+  private async insertBlank(pages: number[]): Promise<void> {
+    const selected = this.cleanPages(pages);
+    if (!selected.length) return;
+    const after = selected[selected.length - 1];
+    const mapping = new Map<number, number>();
+    for (let page = 1; page <= this.totalPages; page += 1) mapping.set(page, page <= after ? page : page + 1);
+    const focus = this.currentPage <= after ? this.currentPage : this.currentPage + 1;
+    await this.runPageEdit(async () => {
+      const bytes = await insertBlankPage(await this.ensureBytes(), after);
+      await this.commitPages(bytes, mapping, focus);
+    }, 'Could not insert a page.');
+  }
+
+  private chooseReplacement(page: number): void {
+    this.pageMenu = null;
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'application/pdf,.pdf';
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) void this.replacePageFromFile(page, file);
+    });
+    input.click();
+  }
+
+  private async replacePageFromFile(page: number, file: File): Promise<void> {
+    if (!file.name.toLowerCase().endsWith('.pdf') && file.type !== 'application/pdf') {
+      this.pageNote = 'Choose a PDF to replace this page.';
+      return;
+    }
+    await this.runPageEdit(async () => {
+      const source = new Uint8Array(await file.arrayBuffer());
+      const bytes = await replaceDocumentPage(await this.ensureBytes(), page, source);
+      const mapping = this.identityPages();
+      mapping.delete(page);
+      await this.commitPages(bytes, mapping, page);
+    }, 'Could not replace that page.');
+  }
+
+  private async savePageCopy(pages: number[]): Promise<void> {
+    const selected = this.cleanPages(pages);
+    if (!selected.length) return;
+    this.pageMenu = null;
+    this.pageBusy = true;
+    try {
+      const bytes = await extractDocumentPages(await this.ensureBytes(), selected);
+      const base = this.downloadName.replace(/\.pdf$/i, '') || 'document';
+      const label = selected.length === 1 ? `page-${selected[0]}` : 'pages';
+      this.downloadFile(bytes, `${base}-${label}.pdf`);
+      this.pageNote = '';
+    } catch (error) {
+      this.reportError('Could not save those pages.', error);
+    } finally {
+      this.pageBusy = false;
+    }
+  }
+
+  private pageOps(pages: number[]) {
+    const locked = this.pageBusy || !this.pdf;
+    const replacePage = pages[0];
     return html`
-      <aside class="pages" aria-label="Pages">
-        ${pages.length === 0 ? html`<p class="pages-empty">Open a PDF to see pages.</p>` : null}
-        ${pages.map(
-          (page) => html`
+      <div class="page-ops" role="menu" aria-label="Page actions">
+        <div class="view-heading" role="presentation">${pages.length > 1 ? `${pages.length} pages` : `Page ${pages[0]}`}</div>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.movePages(pages, 'start')}>Move to the start</button>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.movePages(pages, 'end')}>Move to the end</button>
+        <div class="rule"></div>
+        <div class="view-heading" role="presentation">Turn</div>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.turnPages(pages, 1)}>Turn clockwise</button>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.turnPages(pages, -1)}>Turn counterclockwise</button>
+        <div class="rule"></div>
+        <div class="view-heading" role="presentation">Pages</div>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.insertBlank(pages)}>Insert a blank page</button>
+        <button type="button" role="menuitem" ?disabled=${locked || pages.length !== 1} @click=${() => this.chooseReplacement(replacePage)}>Replace from a PDF</button>
+        <button type="button" role="menuitem" ?disabled=${locked} @click=${() => void this.savePageCopy(pages)}>Save a copy</button>
+        <button type="button" role="menuitem" class="danger" ?disabled=${locked || pages.length >= this.totalPages} @click=${() => void this.removePages(pages)}>Remove</button>
+      </div>
+    `;
+  }
+
+  private async refreshOutline(): Promise<void> {
+    const pdf = this.pdf;
+    const token = ++this.outlineToken;
+    if (!pdf) {
+      this.outlineItems = [];
+      this.outlineOpen = [];
+      return;
+    }
+    try {
+      const items = await readOutline(pdf);
+      if (token !== this.outlineToken || this.pdf !== pdf) return;
+      this.outlineItems = items;
+      this.outlineOpen = this.outlineBranchIds(items);
+    } catch {
+      if (token === this.outlineToken) {
+        this.outlineItems = [];
+        this.outlineOpen = [];
+      }
+    }
+  }
+
+  private outlineBranchIds(items: OutlineEntry[]): string[] {
+    const ids: string[] = [];
+    const walk = (nodes: OutlineEntry[]) => {
+      for (const node of nodes) {
+        if (node.items.length === 0) continue;
+        ids.push(node.id);
+        walk(node.items);
+      }
+    };
+    walk(items);
+    return ids;
+  }
+
+  private toggleOutline(id: string): void {
+    this.outlineOpen = this.outlineOpen.includes(id)
+      ? this.outlineOpen.filter((item) => item !== id)
+      : [...this.outlineOpen, id];
+  }
+
+  private openOutlineEntry(entry: OutlineEntry): void {
+    if (entry.page) {
+      this.goToPage(entry.page);
+      return;
+    }
+    if (entry.url && /^https?:/i.test(entry.url)) window.open(entry.url, '_blank', 'noopener');
+  }
+
+  private outlineTree(items: OutlineEntry[], depth: number): unknown {
+    return items.map((item) => {
+      const open = this.outlineOpen.includes(item.id);
+      return html`
+        <div class="outline-row" style=${`padding-left:${depth * 14}px`}>
+          ${item.items.length
+            ? html`
+                <button type="button" class="outline-twist" aria-label=${open ? 'Collapse' : 'Expand'} @click=${() => this.toggleOutline(item.id)}>
+                  ${open ? '▾' : '▸'}
+                </button>
+              `
+            : html`<span class="outline-twist"></span>`}
+          <button
+            type="button"
+            class="outline-link"
+            aria-current=${item.page === this.currentPage ? 'page' : nothing}
+            ?disabled=${item.page == null && !item.url}
+            @click=${() => this.openOutlineEntry(item)}
+          >
+            ${item.title}
+          </button>
+        </div>
+        ${open ? this.outlineTree(item.items, depth + 1) : null}
+      `;
+    });
+  }
+
+  private outlinePane() {
+    return html`
+      <div class="pane-section-head"><h2>Outline</h2></div>
+      <div class="pane-list">
+        ${this.outlineItems.length
+          ? this.outlineTree(this.outlineItems, 0)
+          : html`<p class="bookmark-empty">No outline in this document.</p>`}
+      </div>
+    `;
+  }
+
+  private startBookmark(page = this.currentPage): void {
+    this.bookmarkEditing = false;
+    this.bookmarkDraft = { page, title: '' };
+  }
+
+  private addBookmark(): void {
+    const draft = this.bookmarkDraft;
+    const title = draft?.title.trim() ?? '';
+    if (!draft || !title) return;
+    this.pageBookmarks = [...this.pageBookmarks, { id: `bookmark-${Date.now()}`, page: draft.page, title }];
+    this.bookmarkDraft = null;
+  }
+
+  private removeBookmark(id: string): void {
+    this.pageBookmarks = this.pageBookmarks.filter((item) => item.id !== id);
+    if (this.pageBookmarks.length === 0) this.bookmarkEditing = false;
+  }
+
+  private pageBookmarkButton(page: number) {
+    if (!this.showBookmarksOnPage || this.isReadOnlyPreview()) return null;
+    const marked = this.pageBookmarks.some((item) => item.page === page);
+    return html`
+      <button
+        class="page-bookmark ${marked ? 'marked' : ''}"
+        type="button"
+        aria-label=${marked ? `Bookmarks on page ${page}` : `Bookmark page ${page}`}
+        @pointerdown=${(event: Event) => event.stopPropagation()}
+        @click=${() => {
+          this.pagesPressed = true;
+          this.pageTab = 'bookmarks';
+          if (page !== this.currentPage) this.goToPage(page);
+          if (!this.pageBookmarks.some((item) => item.page === page)) this.startBookmark(page);
+        }}
+      >
+        ${iconPaneBookmark()}
+      </button>
+    `;
+  }
+
+  private bookmarkPane() {
+    const marks = [...this.pageBookmarks].sort((a, b) => a.page - b.page || a.title.localeCompare(b.title));
+    const draft = this.bookmarkDraft;
+    return html`
+      <div class="pane-section-head">
+        <h2>Bookmarks</h2>
+        <button
+          type="button"
+          ?disabled=${marks.length === 0 && !this.bookmarkEditing}
+          @click=${() => {
+            this.bookmarkEditing = !this.bookmarkEditing;
+            if (this.bookmarkEditing) this.bookmarkDraft = null;
+          }}
+        >
+          ${this.bookmarkEditing ? 'Done' : 'Edit'}
+        </button>
+      </div>
+      <label class="pane-toggle">
+        <span class="switch">
+          <input
+            type="checkbox"
+            aria-label="Show on the page"
+            .checked=${this.showBookmarksOnPage}
+            @change=${(event: Event) => {
+              this.showBookmarksOnPage = (event.target as HTMLInputElement).checked;
+            }}
+          />
+          <span></span>
+        </span>
+        Show on the page
+      </label>
+      <div class="pane-list">
+        ${draft
+          ? html`
+              <form
+                class="bookmark-form"
+                @submit=${(event: Event) => {
+                  event.preventDefault();
+                  this.addBookmark();
+                }}
+              >
+                <p>Page ${draft.page}</p>
+                <input
+                  type="text"
+                  aria-label="Bookmark title"
+                  placeholder="Title"
+                  .value=${draft.title}
+                  @input=${(event: Event) => {
+                    if (!this.bookmarkDraft) return;
+                    this.bookmarkDraft = { ...this.bookmarkDraft, title: (event.target as HTMLInputElement).value };
+                  }}
+                />
+                <div class="bookmark-form-actions">
+                  <button type="button" @click=${() => { this.bookmarkDraft = null; }}>Cancel</button>
+                  <button class="primary" type="submit" ?disabled=${draft.title.trim().length === 0}>Add</button>
+                </div>
+              </form>
+            `
+          : null}
+        ${marks.length === 0 && !draft ? html`<p class="bookmark-empty">No bookmarks yet.</p>` : null}
+        ${marks.map(
+          (item) => html`
+            <div class="bookmark-row">
+              <button type="button" class="bookmark-main" @click=${() => this.goToPage(item.page)}>
+                <span class="bookmark-page">Page ${item.page}</span>
+                <span class="bookmark-title">${item.title}</span>
+              </button>
+              ${this.bookmarkEditing
+                ? html`
+                    <button type="button" class="bookmark-remove" aria-label=${`Remove ${item.title}`} @click=${() => this.removeBookmark(item.id)}>
+                      ${iconTrash()}
+                    </button>
+                  `
+                : null}
+            </div>
+          `,
+        )}
+      </div>
+      <button type="button" class="pane-add" @click=${() => this.startBookmark()}>+ Add a bookmark</button>
+    `;
+  }
+
+  private paneTabs() {
+    const tabs: Array<{ id: PagePaneTab; label: string; icon: () => SVGTemplateResult }> = [
+      { id: 'thumbs', label: 'Thumbnails', icon: iconPaneThumbs },
+      { id: 'outline', label: 'Outline', icon: iconPaneOutline },
+      { id: 'bookmarks', label: 'Bookmarks', icon: iconPaneBookmark },
+      { id: 'layers', label: 'Layers', icon: iconPaneLayers },
+      { id: 'files', label: 'Attachments', icon: iconPaneClip },
+    ];
+    return html`
+      <div class="pane-tabs" role="tablist" aria-label="Side panel">
+        ${tabs.map(
+          (tab) => html`
             <button
-              class="thumb"
               type="button"
-              data-page=${page}
-              aria-label=${`Page ${page}`}
-              aria-current=${page === this.currentPage ? 'page' : nothing}
-              @click=${() => this.goToPage(page)}
+              role="tab"
+              aria-label=${tab.label}
+              aria-selected=${this.pageTab === tab.id}
+              title=${tab.label}
+              @click=${() => {
+                this.pageTab = tab.id;
+                this.pageMenu = null;
+              }}
             >
-              <span class="thumb-frame"><canvas></canvas></span>
-              <span>${page}</span>
+              ${tab.icon()}
             </button>
           `,
         )}
+      </div>
+    `;
+  }
+
+  private paneSoon() {
+    const copy = {
+      layers: ['Layers', 'Optional content in this document will be listed here.'],
+      files: ['Attachments', 'Files attached to this document will be listed here.'],
+    } as const;
+    const tab = this.pageTab === 'files' ? 'files' : 'layers';
+    const [title, body] = copy[tab];
+    return html`
+      <div class="pane-soon">
+        <h2>${title}</h2>
+        <p>${body}</p>
+      </div>
+    `;
+  }
+
+  private thumbnailPane() {
+    const pages = Array.from({ length: this.totalPages }, (_, index) => index + 1);
+    const menuPages = this.menuPages();
+    const locked = this.pageBusy || !this.pdf;
+    return html`
+      <div class="pane-size">
+        <button type="button" aria-label="Smaller thumbnails" ?disabled=${this.thumbWidth <= 72} @click=${() => this.setThumbWidth(this.thumbWidth - 16)}>
+          ${iconMinus}
+        </button>
+        <input
+          type="range"
+          min="72"
+          max="200"
+          step="8"
+          .value=${String(this.thumbWidth)}
+          aria-label="Thumbnail size"
+          @input=${(event: Event) => this.setThumbWidth(Number((event.target as HTMLInputElement).value))}
+        />
+        <button type="button" aria-label="Larger thumbnails" ?disabled=${this.thumbWidth >= 200} @click=${() => this.setThumbWidth(this.thumbWidth + 16)}>
+          ${iconPlus}
+        </button>
+      </div>
+      <div class="pane-list">
+        ${pages.length === 0 ? html`<p class="pages-empty">Open a PDF to see pages.</p>` : null}
+        ${repeat(
+          pages,
+          (page) => page,
+          (page) => html`
+            <div class="thumb-card ${page === this.currentPage ? 'current' : ''} ${this.pagePicks.includes(page) ? 'picked' : ''} ${this.pageMenu?.scope === 'one' && this.pageMenu.page === page ? 'menu' : ''}">
+              <button
+                class="thumb"
+                type="button"
+                data-page=${page}
+                aria-label=${`Page ${page}`}
+                aria-current=${page === this.currentPage ? 'page' : nothing}
+                @click=${() => this.goToPage(page)}
+              >
+                <span class="thumb-frame" style=${`width:${this.thumbWidth}px`}><canvas></canvas></span>
+                <span class="thumb-num">${page}</span>
+              </button>
+              <div class="thumb-actions">
+                <button type="button" aria-label="Turn counterclockwise" ?disabled=${locked} @click=${() => void this.turnPages([page], -1)}>
+                  ${iconTurnLeft()}
+                </button>
+                <button type="button" class="danger" aria-label="Remove page" ?disabled=${locked || this.totalPages < 2} @click=${() => void this.removePages([page])}>
+                  ${iconTrash()}
+                </button>
+                <button
+                  class="thumb-more"
+                  type="button"
+                  aria-label="Page actions"
+                  aria-expanded=${this.pageMenu?.scope === 'one' && this.pageMenu.page === page}
+                  ?disabled=${locked}
+                  @click=${() => this.togglePageMenu(page, 'one')}
+                >
+                  ${iconMore()}
+                </button>
+              </div>
+            </div>
+          `,
+        )}
+      </div>
+      ${menuPages.length ? this.pageOps(menuPages) : null}
+      ${this.pagePicks.length
+        ? html`
+            <div class="pick-bar">
+              <button type="button" aria-label="Turn counterclockwise" ?disabled=${locked} @click=${() => void this.turnPages(this.pagePicks, -1)}>${iconTurnLeft()}</button>
+              <button type="button" aria-label="Turn clockwise" ?disabled=${locked} @click=${() => void this.turnPages(this.pagePicks, 1)}>${iconTurnRight()}</button>
+              <button type="button" aria-label="Move earlier" ?disabled=${locked} @click=${() => void this.movePages(this.pagePicks, 'up')}>${iconMoveUp()}</button>
+              <button type="button" aria-label="Move later" ?disabled=${locked} @click=${() => void this.movePages(this.pagePicks, 'down')}>${iconMoveDown()}</button>
+              <button
+                class="pick-more"
+                type="button"
+                aria-label="Actions for selected pages"
+                aria-expanded=${this.pageMenu?.scope === 'many'}
+                ?disabled=${locked}
+                @click=${() => this.togglePageMenu(0, 'many')}
+              >
+                ${iconMore()}
+              </button>
+            </div>
+          `
+        : null}
+      <div class="pane-foot">
+        ${this.pageNote ? html`<p class="pane-note">${this.pageNote}</p>` : null}
+        <p>Pages to use, such as 1, 3, 5-10</p>
+        <div class="pane-foot-row">
+          <input
+            type="text"
+            .value=${this.pageListDraft}
+            placeholder="1, 3, 5-10"
+            aria-label="Pages to use"
+            @input=${(event: Event) => {
+              this.pageListDraft = (event.target as HTMLInputElement).value;
+            }}
+            @keydown=${(event: KeyboardEvent) => {
+              if (event.key !== 'Enter') return;
+              event.preventDefault();
+              this.applyPageList();
+            }}
+          />
+          <button type="button" aria-label="Use these pages" @click=${() => this.applyPageList()}>${iconPaneCheck()}</button>
+          ${this.pagePicks.length || this.pageListDraft
+            ? html`<button type="button" aria-label="Clear pages" @click=${() => this.clearPagePicks()}>${iconPaneClear()}</button>`
+            : null}
+        </div>
+      </div>
+    `;
+  }
+
+  private get pagesPanel() {
+    if (!this.pagesPressed) return null;
+    return html`
+      <aside class="pages" aria-label="Thumbnails">
+        ${this.paneTabs()}
+        ${this.pageTab === 'thumbs'
+          ? this.thumbnailPane()
+          : this.pageTab === 'outline'
+            ? this.outlinePane()
+            : this.pageTab === 'bookmarks'
+              ? this.bookmarkPane()
+              : this.paneSoon()}
       </aside>
     `;
   }
@@ -7354,7 +8562,7 @@ export class PdfEditor extends LitElement {
             <button
               class="icon"
               type="button"
-              aria-label="Page panel"
+              aria-label="Thumbnails"
               aria-pressed=${this.pagesPressed}
               @click=${() => {
                 this.pagesPressed = !this.pagesPressed;
@@ -7886,6 +9094,7 @@ export class PdfEditor extends LitElement {
                                   }}
                                 ></button>
                               `}
+                          ${this.pageBookmarkButton(page)}
                         </div>
                       `,
                     )}
