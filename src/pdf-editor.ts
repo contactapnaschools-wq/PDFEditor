@@ -18,11 +18,39 @@ import {
   iconSave,
   iconSearch,
   iconSelect,
+  iconShapeArc,
+  iconShapeArrow,
+  iconShapeCloud,
+  iconShapeEllipse,
+  iconShapeFreehand,
+  iconShapeHighlight,
+  iconShapeLine,
+  iconShapePolygon,
+  iconShapePolyline,
+  iconShapeRect,
+  iconUndo,
+  iconRedo,
+  iconEraser,
+  iconAnnHighlight,
+  iconAnnUnderline,
+  iconAnnSquiggly,
+  iconAnnStrike,
+  iconAnnFreeText,
+  iconAnnPen,
+  iconAnnText,
+  iconAnnCallout,
+  iconAnnNote,
+  iconInsertStamp,
+  iconInsertSign,
+  iconInsertClip,
+  iconInsertImage,
+  iconInsertCrop,
 } from './icons';
 import {
   addCheckBox,
   addTextField,
   applyMarks,
+  cloudOutline,
   findText,
   isRenderCancel,
   openDocument,
@@ -39,13 +67,19 @@ import {
   projectRect,
   rebuildPages,
   rectsIntersect,
+  cropDocumentPage,
   replaceDocumentPage,
+  stampFill,
+  stampSize,
+  stampStyle,
+  STANDARD_STAMPS,
   replaceLineText,
   rotateDocumentPages,
   setTextField,
   toggleCheckBox,
   viewportToPdf,
   type DrawnMark,
+  type StampStyle,
   type OutlineEntry,
   type PdfRect,
   type TextMatch,
@@ -67,10 +101,12 @@ export type PdfSource = File | ArrayBuffer | Uint8Array | string;
 
 type EditorMode = 'view' | 'annotate' | 'shapes' | 'insert' | 'measure' | 'edit' | 'fill-sign' | 'forms';
 type PointerTool = 'hand' | 'select';
-type MarkKind = 'highlight' | 'underline' | 'strike' | 'note' | 'freetext' | 'pen' | 'callout' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'polygon' | 'text' | 'image' | 'link' | 'stamp' | 'distance' | 'perimeter' | 'area' | 'signature' | 'initials' | 'date';
+type MarkKind = 'highlight' | 'underline' | 'squiggly' | 'strike' | 'note' | 'freetext' | 'pen' | 'callout' | 'line' | 'arrow' | 'rect' | 'ellipse' | 'polygon' | 'arc' | 'cloud' | 'polyline' | 'freehand-highlight' | 'text' | 'image' | 'link' | 'stamp' | 'file' | 'distance' | 'perimeter' | 'area' | 'signature' | 'initials' | 'date';
+type TextStyleKind = 'highlight' | 'underline' | 'squiggly' | 'strike';
 type TextMarkKind = 'note' | 'freetext' | 'callout' | 'text' | 'link' | 'initials';
-type ShapeKind = 'line' | 'arrow' | 'rect' | 'ellipse' | 'polygon';
-type InsertKind = 'text' | 'image' | 'link' | 'stamp';
+type ShapeKind = 'rect' | 'ellipse' | 'arc' | 'polygon' | 'cloud' | 'line' | 'polyline' | 'arrow' | 'pen' | 'freehand-highlight' | 'eraser';
+type DrawnShape = 'line' | 'arrow' | 'rect' | 'ellipse' | 'polygon' | 'arc' | 'cloud' | 'polyline';
+type InsertKind = 'text' | 'image' | 'link' | 'stamp' | 'signature' | 'file' | 'crop';
 type MeasureKind = 'distance' | 'perimeter' | 'area';
 type SignKind = 'signature' | 'initials' | 'date';
 type FormKind = 'text-field' | 'checkbox';
@@ -124,6 +160,12 @@ interface Mark {
   status: CommentStatus;
   marked: boolean;
   replies: NoteReply[];
+}
+
+interface EditorSnapshot {
+  marks: Mark[];
+  pdfBytes: Uint8Array | null;
+  textEdits: TextEdit[];
 }
 
 interface MarkBox extends ViewportBox {
@@ -241,6 +283,7 @@ const STYLE_WEIGHTS: ReadonlyArray<{ id: number; label: string }> = [
 const MARK_TOOLS: ReadonlyArray<{ id: MarkKind; label: string }> = [
   { id: 'highlight', label: 'Highlight' },
   { id: 'underline', label: 'Underline' },
+  { id: 'squiggly', label: 'Squiggly' },
   { id: 'strike', label: 'Strikethrough' },
   { id: 'note', label: 'Note' },
   { id: 'freetext', label: 'Free text' },
@@ -248,12 +291,29 @@ const MARK_TOOLS: ReadonlyArray<{ id: MarkKind; label: string }> = [
   { id: 'callout', label: 'Callout' },
 ];
 
-const SHAPE_TOOLS: ReadonlyArray<{ id: ShapeKind; label: string }> = [
-  { id: 'line', label: 'Line' },
-  { id: 'arrow', label: 'Arrow' },
-  { id: 'rect', label: 'Rectangle' },
-  { id: 'ellipse', label: 'Ellipse' },
-  { id: 'polygon', label: 'Polygon' },
+const ANNOTATE_TOOLS: ReadonlyArray<{ id: MarkKind | 'text'; label: string; shortcut?: string; icon: SVGTemplateResult }> = [
+  { id: 'highlight', label: 'Highlight', shortcut: 'H', icon: iconAnnHighlight },
+  { id: 'underline', label: 'Underline', shortcut: 'U', icon: iconAnnUnderline },
+  { id: 'squiggly', label: 'Squiggly', shortcut: 'G', icon: iconAnnSquiggly },
+  { id: 'strike', label: 'Strikethrough', shortcut: 'K', icon: iconAnnStrike },
+  { id: 'freetext', label: 'Free text', shortcut: 'T', icon: iconAnnFreeText },
+  { id: 'pen', label: 'Pen', shortcut: 'P', icon: iconAnnPen },
+  { id: 'text', label: 'Text', icon: iconAnnText },
+  { id: 'callout', label: 'Callout', shortcut: 'C', icon: iconAnnCallout },
+  { id: 'note', label: 'Note', shortcut: 'N', icon: iconAnnNote },
+];
+
+const SHAPE_TOOLS: ReadonlyArray<{ id: ShapeKind; label: string; icon: SVGTemplateResult }> = [
+  { id: 'rect', label: 'Rectangle', icon: iconShapeRect },
+  { id: 'ellipse', label: 'Ellipse', icon: iconShapeEllipse },
+  { id: 'arc', label: 'Arc', icon: iconShapeArc },
+  { id: 'polygon', label: 'Polygon', icon: iconShapePolygon },
+  { id: 'cloud', label: 'Cloud', icon: iconShapeCloud },
+  { id: 'line', label: 'Line', icon: iconShapeLine },
+  { id: 'polyline', label: 'Polyline', icon: iconShapePolyline },
+  { id: 'arrow', label: 'Arrow', icon: iconShapeArrow },
+  { id: 'pen', label: 'Freehand', icon: iconShapeFreehand },
+  { id: 'freehand-highlight', label: 'Freehand highlight', icon: iconShapeHighlight },
 ];
 
 const COMMENT_STATUSES: ReadonlyArray<{ id: CommentStatus; label: string; color: string }> = [
@@ -264,12 +324,37 @@ const COMMENT_STATUSES: ReadonlyArray<{ id: CommentStatus; label: string; color:
   { id: 'none', label: 'None', color: '#dadce0' },
 ];
 
-const INSERT_TOOLS: ReadonlyArray<{ id: InsertKind; label: string }> = [
-  { id: 'text', label: 'Text' },
-  { id: 'image', label: 'Image' },
-  { id: 'link', label: 'Link' },
-  { id: 'stamp', label: 'Stamp' },
+const INSERT_TOOLS: ReadonlyArray<{ id: InsertKind; label: string; icon: SVGTemplateResult }> = [
+  { id: 'stamp', label: 'Stamp', icon: iconInsertStamp },
+  { id: 'signature', label: 'Signature', icon: iconInsertSign },
+  { id: 'file', label: 'File attachment', icon: iconInsertClip },
+  { id: 'image', label: 'Image', icon: iconInsertImage },
+  { id: 'crop', label: 'Crop', icon: iconInsertCrop },
 ];
+
+const SIGNATURE_FONTS: ReadonlyArray<{ id: string; label: string }> = [
+  { id: '"Segoe Script", cursive', label: 'Segoe Script' },
+  { id: '"Brush Script MT", cursive', label: 'Brush Script' },
+  { id: '"Lucida Handwriting", cursive', label: 'Lucida Handwriting' },
+  { id: 'cursive', label: 'Cursive' },
+];
+
+const STAMP_COLORS = ['#188038', '#1a73e8', '#d93025'] as const;
+const SIGNATURE_COLORS = ['#202124', '#1a73e8', '#d93025'] as const;
+const LIBRARY_STAMPS = 'pdf-editor-custom-stamps';
+const LIBRARY_SIGNATURES = 'pdf-editor-signatures';
+
+interface SavedSignature {
+  id: string;
+  name: string;
+  src: string;
+}
+
+interface SavedStamp {
+  id: string;
+  label: string;
+  ink: string;
+}
 
 const MEASURE_TOOLS: ReadonlyArray<{ id: MeasureKind; label: string }> = [
   { id: 'distance', label: 'Distance' },
@@ -288,7 +373,6 @@ const FORM_TOOLS: ReadonlyArray<{ id: FormKind; label: string }> = [
   { id: 'checkbox', label: 'Checkbox' },
 ];
 
-const STAMPS = ['Approved', 'Draft', 'Final', 'Confidential'] as const;
 type ZoomMode = 'percent' | 'fit-page' | 'fit-width';
 
 const MODES: ReadonlyArray<{ id: EditorMode; label: string }> = [
@@ -536,14 +620,21 @@ function iconPaneClear(): SVGTemplateResult {
   `;
 }
 
+interface PreviewFileHandle {
+  name: string;
+  getFile?: () => Promise<File>;
+  createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+}
+
 interface PreviewSavePicker {
   showSaveFilePicker?: (options: {
     suggestedName?: string;
     types?: Array<{ description?: string; accept: Record<string, string[]> }>;
-  }) => Promise<{
-    name: string;
-    createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
-  }>;
+  }) => Promise<PreviewFileHandle>;
+  showOpenFilePicker?: (options: {
+    multiple?: boolean;
+    types?: Array<{ description?: string; accept: Record<string, string[]> }>;
+  }) => Promise<PreviewFileHandle[]>;
 }
 
 type SettingsSection = 'theme' | 'shortcuts' | 'advanced';
@@ -552,12 +643,60 @@ type ViewSpread = 'single' | 'pair' | 'cover';
 type PagePaneTab = 'thumbs' | 'outline' | 'bookmarks' | 'layers' | 'files';
 type PageMove = 'start' | 'end' | 'up' | 'down';
 
+function semicircle(start: { x: number; y: number }, end: { x: number; y: number }, steps = 24): Array<{ x: number; y: number }> {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length < 1) return [start, end];
+  const radius = length / 2;
+  const midX = (start.x + end.x) / 2;
+  const midY = (start.y + end.y) / 2;
+  const ux = dx / length;
+  const uy = dy / length;
+  const points: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index <= steps; index += 1) {
+    const theta = Math.PI - (Math.PI * index) / steps;
+    const along = Math.cos(theta);
+    const side = Math.sin(theta);
+    points.push({
+      x: midX + along * radius * ux + side * radius * -uy,
+      y: midY + along * radius * uy + side * radius * ux,
+    });
+  }
+  return points;
+}
+
+function distanceToSegment(point: { x: number; y: number }, start: { x: number; y: number }, end: { x: number; y: number }): number {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const lengthSq = dx * dx + dy * dy;
+  if (lengthSq === 0) return Math.hypot(point.x - start.x, point.y - start.y);
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSq));
+  return Math.hypot(point.x - (start.x + t * dx), point.y - (start.y + t * dy));
+}
+
+function pointInPolygon(point: { x: number; y: number }, points: Array<{ x: number; y: number }>): boolean {
+  let inside = false;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index, index += 1) {
+    const current = points[index];
+    const prior = points[previous];
+    const crosses = current.y > point.y !== prior.y > point.y;
+    if (!crosses) continue;
+    const x = ((prior.x - current.x) * (point.y - current.y)) / (prior.y - current.y || 0.00001) + current.x;
+    if (point.x < x) inside = !inside;
+  }
+  return inside;
+}
+
 const SETTINGS_SHORTCUTS: ReadonlyArray<{ keys: string; description: string; scope: 'all' | 'pdf' | 'preview' }> = [
   { keys: 'Ctrl + O', description: 'Open a file', scope: 'all' },
-  { keys: 'Ctrl + S', description: 'Save the PDF', scope: 'pdf' },
+  { keys: 'Ctrl + S', description: 'Save into the opened file', scope: 'pdf' },
   { keys: 'Ctrl + S', description: 'Download this file', scope: 'preview' },
   { keys: 'Ctrl + P', description: 'Print', scope: 'all' },
   { keys: 'Ctrl + F', description: 'Find in the document', scope: 'pdf' },
+  { keys: 'Ctrl + Z', description: 'Undo', scope: 'pdf' },
+  { keys: 'Ctrl + Y', description: 'Redo', scope: 'pdf' },
+  { keys: 'Ctrl + Shift + Z', description: 'Redo', scope: 'pdf' },
   { keys: 'Ctrl + C', description: 'Copy the selected text', scope: 'pdf' },
   { keys: 'Ctrl + +', description: 'Zoom in', scope: 'all' },
   { keys: 'Ctrl + -', description: 'Zoom out', scope: 'all' },
@@ -912,6 +1051,14 @@ export class PdfEditor extends LitElement {
     }
     .mark.highlight { background: var(--mark-fill, rgba(246, 191, 38, 0.45)); }
     .mark.underline { border-bottom: var(--mark-weight, 2px) solid var(--mark-ink, #e37400); }
+    .mark.squiggly { overflow: visible; }
+    .mark.squiggly .squiggle {
+      position: absolute;
+      left: 0;
+      bottom: 0;
+      overflow: visible;
+      pointer-events: none;
+    }
     .mark.strike::after {
       content: "";
       position: absolute;
@@ -1154,12 +1301,257 @@ export class PdfEditor extends LitElement {
       cursor: pointer;
     }
     .reply-form button:disabled { opacity: 0.45; cursor: default; }
+    .annotate-bar button:disabled { opacity: 0.45; cursor: default; }
+    .annotate-bar button:disabled:hover { background: transparent; }
     .annotate-bar button:hover { background: #e8eaed; }
     .annotate-bar button[aria-pressed='true'] {
       color: #1a73e8;
       background: #e8f0fe;
       border-color: #d2e3fc;
     }
+    .annotate-bar.icons button,
+    .annotate-bar.shapes button {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .annotate-bar.shapes button { color: #e25c4c; }
+    .annotate-bar.icons button.history { color: #5f6368; }
+    .annotate-bar.icons button.eraser { color: #e25c4c; }
+    .annotate-bar.icons button[aria-pressed='true'] {
+      background: transparent;
+      border-color: #1a73e8;
+    }
+    .annotate-bar.icons button.eraser[aria-pressed='true'] { color: #e25c4c; }
+    .annotate-bar.icons button svg,
+    .annotate-bar.shapes button svg { width: 20px; height: 20px; display: block; }
+    .hover-tip {
+      position: fixed;
+      z-index: 40;
+      transform: translateX(-50%);
+      padding: 4px 8px;
+      border-radius: 4px;
+      background: #202124;
+      color: #fff;
+      font-size: 12px;
+      line-height: 16px;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+    .hover-tip::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: -5px;
+      transform: translateX(-50%);
+      border-left: 5px solid transparent;
+      border-right: 5px solid transparent;
+      border-bottom: 5px solid #202124;
+    }
+    .annotate-bar.shapes button[aria-pressed='true'] {
+      color: #e25c4c;
+      background: transparent;
+      border-color: #1a73e8;
+    }
+    .annotate-bar.insert button {
+      width: 32px;
+      height: 32px;
+      padding: 0;
+      color: #5f6368;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .annotate-bar.insert button svg { width: 20px; height: 20px; display: block; }
+    .annotate-bar.insert button[aria-pressed='true'] {
+      color: #5f6368;
+      background: transparent;
+      border-color: #1a73e8;
+    }
+    .annotate-bar.insert button.eraser { color: #e25c4c; }
+    .annotate-bar.insert button.eraser[aria-pressed='true'] { color: #e25c4c; }
+    .insert-panel {
+      width: 248px;
+      flex: none;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      background: #fff;
+      border-right: 1px solid #e0e3e7;
+    }
+    .insert-panel h2 {
+      margin: 0;
+      padding: 16px 16px 8px;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .insert-panel .panel-scroll { flex: 1; min-height: 0; overflow: auto; padding: 0 12px 16px; }
+    .panel-create {
+      width: 100%;
+      height: 36px;
+      margin-bottom: 12px;
+      border: 1px solid #1a73e8;
+      border-radius: 4px;
+      background: #fff;
+      color: #1a73e8;
+      font-size: 14px;
+      cursor: pointer;
+    }
+    .panel-fold {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+      height: 32px;
+      margin: 4px 0;
+      border: none;
+      background: transparent;
+      color: #202124;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .stamp-choice, .sign-choice {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      width: 100%;
+      margin: 0 0 8px;
+      padding: 8px;
+      border: 1px solid #dadce0;
+      border-radius: 6px;
+      background: #fff;
+      cursor: pointer;
+    }
+    .stamp-choice[aria-pressed='true'], .sign-choice[aria-pressed='true'] { border-color: #1a73e8; }
+    .stamp-face {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 88px;
+      min-height: 28px;
+      padding: 4px 10px;
+      border: 1.5px solid currentColor;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      line-height: 1.2;
+      text-align: center;
+    }
+    .stamp-face.arrow {
+      border: none;
+      border-radius: 2px;
+      clip-path: polygon(16% 0, 100% 0, 100% 100%, 16% 100%, 0 50%);
+      padding-left: 18px;
+    }
+    .stamp-face.check, .stamp-face.cross { min-width: 72px; border-color: transparent; background: transparent; font-size: 22px; }
+    .sign-choice img { width: 140px; height: 42px; object-fit: contain; }
+    .sign-choice .trash {
+      margin-left: auto;
+      border: none;
+      background: transparent;
+      color: #5f6368;
+      cursor: pointer;
+    }
+    .mark.stamp {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      border: 1.5px solid var(--stamp-ink, #1a73e8);
+      border-radius: 4px;
+      background: var(--stamp-fill, #e8f0fe);
+      color: var(--stamp-text, #1a73e8);
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      line-height: 1;
+      text-align: center;
+      overflow: hidden;
+    }
+    .mark.stamp.arrow {
+      border: none;
+      clip-path: polygon(14% 0, 100% 0, 100% 100%, 14% 100%, 0 50%);
+    }
+    .mark.stamp.check, .mark.stamp.cross { border: none; background: transparent; }
+    .mark.file { background: transparent; }
+    .mark.file svg { width: 100%; height: 100%; }
+    .library-dialog { width: min(560px, calc(100vw - 48px)); }
+    .sign-tabs { display: flex; gap: 0; margin-bottom: 12px; }
+    .sign-tabs button {
+      flex: 1;
+      height: 36px;
+      border: 1px solid #dadce0;
+      background: #fff;
+      color: #202124;
+      cursor: pointer;
+    }
+    .sign-tabs button:first-child { border-radius: 4px 0 0 4px; }
+    .sign-tabs button:last-child { border-radius: 0 4px 4px 0; }
+    .sign-tabs button[aria-pressed='true'] { background: #1a73e8; border-color: #1a73e8; color: #fff; }
+    .sign-pad, .sign-drop {
+      width: 100%;
+      height: 180px;
+      border: 1px solid #e0e3e7;
+      border-radius: 8px;
+      background: #f8f9fa;
+    }
+    .sign-drop {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      color: #5f6368;
+      border-style: dashed;
+    }
+    .sign-drop img { max-width: 80%; max-height: 90px; object-fit: contain; }
+    .sign-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; color: #5f6368; font-size: 13px; }
+    .sign-foot button, .text-btn {
+      border: none;
+      background: transparent;
+      color: #1a73e8;
+      cursor: pointer;
+    }
+    .sign-tools { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+    .sign-tools select { height: 32px; border: 1px solid #dadce0; border-radius: 4px; }
+    .ink-dot {
+      width: 18px;
+      height: 18px;
+      border: 2px solid #fff;
+      border-radius: 50%;
+      box-shadow: 0 0 0 1px #dadce0;
+      cursor: pointer;
+    }
+    .ink-dot[aria-pressed='true'] { box-shadow: 0 0 0 2px #1a73e8; }
+    .sign-type {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      height: 180px;
+      border: none;
+      background: transparent;
+      text-align: center;
+      font-size: 42px;
+    }
+    .sign-type:focus { outline: none; }
+    .color-row { display: flex; gap: 8px; margin: 12px 0; }
+    .sign-tools .primary {
+      height: 36px;
+      margin-left: auto;
+      padding: 0 16px;
+      border: none;
+      border-radius: 4px;
+      background: #1a73e8;
+      color: #fff;
+      cursor: pointer;
+    }
+    .sign-tools .primary:disabled { background: #e8eaed; color: #80868b; cursor: default; }
+    .sign-choice > button { border: none; background: transparent; padding: 0; cursor: pointer; }
     .viewer.markup { cursor: crosshair; }
 
     .comment-list { flex: 1; min-height: 0; overflow: auto; margin-top: 12px; }
@@ -3082,6 +3474,9 @@ export class PdfEditor extends LitElement {
   @state() private selectedMarkId: string | null = null;
   @state() private markupKind: MarkKind | null = null;
   @state() private shapeKind: ShapeKind | null = null;
+  @state() private undoCount = 0;
+  @state() private tip: { text: string; left: number; top: number } | null = null;
+  @state() private redoCount = 0;
   @state() private insertKind: InsertKind | null = null;
   @state() private measureKind: MeasureKind | null = null;
   @state() private editText = false;
@@ -3092,6 +3487,21 @@ export class PdfEditor extends LitElement {
   @state() private fieldBoxes: FieldBox[] = [];
   @state() private formDraft: FormDraft | null = null;
   @state() private stampMenu: { page: number; pdfX: number; pdfY: number; left: number; top: number } | null = null;
+  @state() private customStamps: SavedStamp[] = [];
+  @state() private armedStampId: string | null = null;
+  @state() private standardStampsOpen = true;
+  @state() private stampDialog = false;
+  @state() private stampLabel = '';
+  @state() private stampInk = '#1a73e8';
+  @state() private savedSignatures: SavedSignature[] = [];
+  @state() private armedSignatureId: string | null = null;
+  @state() private signatureOpen = false;
+  @state() private signatureMode: 'draw' | 'type' | 'upload' = 'draw';
+  @state() private signatureColor = '#202124';
+  @state() private signatureFont = SIGNATURE_FONTS[0].id;
+  @state() private signatureText = '';
+  @state() private signatureUpload = '';
+  private signatureHasInk = false;
   @state() private markBoxes: MarkBox[] = [];
   @state() private draftBox: ViewportBox | null = null;
   @state() private draftStroke: Array<{ x: number; y: number }> = [];
@@ -3115,6 +3525,7 @@ export class PdfEditor extends LitElement {
   @query('.page-canvas') private canvasEl!: HTMLCanvasElement;
   @query('.file-input') private fileInput!: HTMLInputElement;
   @query('.image-input') private imageInput!: HTMLInputElement;
+  @query('.attach-input') private attachInput!: HTMLInputElement;
   @query('.menu-root') private menuRoot!: HTMLElement;
   @query('.zoom-root') private zoomRoot!: HTMLElement;
   @query('.search-root') private searchRoot!: HTMLElement;
@@ -3133,15 +3544,25 @@ export class PdfEditor extends LitElement {
   private resizeObserver: ResizeObserver | null = null;
   private textRunCache = new Map<number, TextRun[]>();
   private markSeq = 0;
+  private past: EditorSnapshot[] = [];
+  private future: EditorSnapshot[] = [];
+  private historyLock = false;
+  private eraseGesture = false;
   private dragStart: { x: number; y: number } | null = null;
   private textSelectStart: { x: number; y: number } | null = null;
   private quickToken = 0;
   private selectionToken = 0;
   private dragToken = 0;
   private imagePoint: { page: number; x: number; y: number } | null = null;
+  private filePoint: { page: number; x: number; y: number } | null = null;
+  private signatureStrokes: Array<{ color: string; points: Array<{ x: number; y: number }> }> = [];
   private pdfBytes: Uint8Array | null = null;
   private sourceUrl = '';
   private downloadName = 'document.pdf';
+  private openedHandle: PreviewFileHandle | null = null;
+  private ignorePersist = false;
+  private persistQueued = false;
+  private persistTimer = 0;
   private wordBytes: Uint8Array | null = null;
   private wordGeneration = 0;
   private imageUrl: string | null = null;
@@ -3173,6 +3594,7 @@ export class PdfEditor extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    this.loadLibrary();
     this.addEventListener('keydown', this.onKeydown);
     window.addEventListener('pointerdown', this.onWindowPointerDown);
     document.addEventListener('fullscreenchange', this.onFullScreenChange);
@@ -3185,6 +3607,8 @@ export class PdfEditor extends LitElement {
     if (document.fullscreenElement === this) void document.exitFullscreen();
     this.resizeObserver?.disconnect();
     window.clearTimeout(this.searchTimer);
+    window.clearTimeout(this.persistTimer);
+    this.openedHandle = null;
     this.cancelThumbnails();
     this.renderToken += 1;
     this.renderTask?.cancel();
@@ -3230,6 +3654,7 @@ export class PdfEditor extends LitElement {
       this.layoutWord();
       requestAnimationFrame(() => this.layoutWord());
     }
+    if (this.signatureOpen && this.signatureMode === 'draw') requestAnimationFrame(() => this.paintSignaturePad());
     if (changed.has('wordZoomOpen') && this.wordZoomOpen) {
       void this.updateComplete.then(() => {
         const ok = this.renderRoot.querySelector('.word-dialog .primary');
@@ -3292,6 +3717,7 @@ export class PdfEditor extends LitElement {
     ) {
       void this.updateComplete.then(() => this.syncSelectAll());
     }
+    if (!this.ignorePersist && this.openedHandle && changed.has('marks')) this.schedulePersist();
     if (changed.has('formDraft') && this.formDraft && !changed.get('formDraft')) {
       void this.updateComplete.then(() => {
         const field = this.renderRoot.querySelector('.form-box textarea');
@@ -3301,7 +3727,16 @@ export class PdfEditor extends LitElement {
   }
 
   /** Open a PDF, or preview a Word document, presentation, or image, from a URL, a File, or binary data. */
-  async load(source: PdfSource): Promise<void> {
+  async load(source: PdfSource, handle: PreviewFileHandle | null = null): Promise<void> {
+    this.openedHandle = null;
+    this.ignorePersist = false;
+    this.past = [];
+    this.future = [];
+    this.undoCount = 0;
+    this.redoCount = 0;
+    this.historyLock = false;
+    this.eraseGesture = false;
+    window.clearTimeout(this.persistTimer);
     if (imageFormat(source)) {
       await this.loadImage(source);
       return;
@@ -3320,6 +3755,7 @@ export class PdfEditor extends LitElement {
     this.wordMenuOpen = false;
     this.wordZoomOpen = false;
     const id = ++this.loadId;
+    this.ignorePersist = true;
     this.loading = true;
     this.errorMessage = '';
     this.pageReady = false;
@@ -3348,6 +3784,7 @@ export class PdfEditor extends LitElement {
     this.selectionToken += 1;
     this.stampMenu = null;
     this.imagePoint = null;
+    this.filePoint = null;
     this.draftBox = null;
     this.draftStroke = [];
     this.draftArrow = 'none';
@@ -3384,6 +3821,7 @@ export class PdfEditor extends LitElement {
         return;
       }
       this.pdf = opened;
+      this.openedHandle = handle;
       this.downloadName = this.fileName(source);
       this.totalPages = opened.numPages;
       this.currentPage = 1;
@@ -3408,8 +3846,13 @@ export class PdfEditor extends LitElement {
       );
       this.scheduleRender();
       if (this.findQuery.trim()) this.queueSearch();
+      void this.updateComplete.then(() => {
+        if (id === this.loadId) this.ignorePersist = false;
+      });
     } catch (error) {
       if (id !== this.loadId) return;
+      this.ignorePersist = false;
+      this.openedHandle = null;
       this.loading = false;
       this.pdf = null;
       this.totalPages = 0;
@@ -4093,6 +4536,17 @@ export class PdfEditor extends LitElement {
       void navigator.clipboard.writeText(quote);
       return true;
     }
+    if (key === 'z' && !this.isReadOnlyPreview()) {
+      event.preventDefault();
+      if (event.shiftKey) this.redo();
+      else this.undo();
+      return true;
+    }
+    if (key === 'y' && !this.isReadOnlyPreview()) {
+      event.preventDefault();
+      this.redo();
+      return true;
+    }
     return false;
   }
 
@@ -4523,7 +4977,8 @@ export class PdfEditor extends LitElement {
   private async exportedPdfBytes(): Promise<Uint8Array> {
     const drawn: DrawnMark[] = [];
     for (const mark of this.marks) {
-      const image = mark.kind === 'image' && mark.src ? await this.imageForSave(mark.src) : null;
+      const image = (mark.kind === 'image' || mark.kind === 'signature') && mark.src ? await this.imageForSave(mark.src) : null;
+      const file = mark.kind === 'file' && mark.src ? this.bytesFromDataUrl(mark.src) : undefined;
       drawn.push({
         kind: mark.kind,
         page: mark.page,
@@ -4532,6 +4987,8 @@ export class PdfEditor extends LitElement {
         points: mark.points,
         image: image?.bytes,
         imageType: image?.type,
+        file,
+        fileName: mark.kind === 'file' ? mark.text : undefined,
         color: mark.color,
         opacity: mark.opacity,
         weight: mark.weight,
@@ -4541,6 +4998,46 @@ export class PdfEditor extends LitElement {
   }
 
   private async save(): Promise<void> {
+    window.clearTimeout(this.persistTimer);
+    const handle = this.openedHandle;
+    if (!handle || !this.pdf) return;
+    if (this.saving) {
+      this.persistQueued = true;
+      return;
+    }
+    this.menuOpen = false;
+    this.saving = true;
+    try {
+      const bytes = await this.exportedPdfBytes();
+      if (this.openedHandle !== handle) return;
+      const writable = await handle.createWritable();
+      const copy = new Uint8Array(bytes);
+      await writable.write(new Blob([copy.buffer], { type: 'application/pdf' }));
+      await writable.close();
+    } catch (error) {
+      this.reportError('Could not save this PDF.', error);
+    } finally {
+      this.saving = false;
+      if (this.persistQueued && this.openedHandle === handle) {
+        this.persistQueued = false;
+        void this.save();
+      } else {
+        this.persistQueued = false;
+      }
+    }
+  }
+
+  private schedulePersist(): void {
+    if (this.ignorePersist || !this.openedHandle || !this.pdf) return;
+    window.clearTimeout(this.persistTimer);
+    this.persistTimer = window.setTimeout(() => void this.save(), 300);
+  }
+
+  private downloadPdf(): void {
+    void this.downloadCurrent();
+  }
+
+  private async downloadCurrent(): Promise<void> {
     if (!this.pdf || this.saving) return;
     this.menuOpen = false;
     this.saving = true;
@@ -4551,10 +5048,6 @@ export class PdfEditor extends LitElement {
     } finally {
       this.saving = false;
     }
-  }
-
-  private downloadPdf(): void {
-    void this.save();
   }
 
   private async savePdfAs(): Promise<void> {
@@ -4588,7 +5081,7 @@ export class PdfEditor extends LitElement {
     if (!chosen?.trim()) return;
     const name = chosen.trim().toLowerCase().endsWith('.pdf') ? chosen.trim() : `${chosen.trim()}.pdf`;
     this.downloadName = name;
-    await this.save();
+    this.downloadFile(await this.exportedPdfBytes(), this.downloadName);
   }
 
   private async printPdf(): Promise<void> {
@@ -4702,6 +5195,7 @@ export class PdfEditor extends LitElement {
     void this.refreshOutline();
     void this.refreshLayers();
     void this.refreshFiles();
+    this.schedulePersist();
   }
 
   private async readSource(source: PdfSource): Promise<Uint8Array | string> {
@@ -4964,6 +5458,7 @@ export class PdfEditor extends LitElement {
     this.selectionToken += 1;
     this.stampMenu = null;
     this.imagePoint = null;
+    this.filePoint = null;
     this.dragStart = null;
     this.draftBox = null;
     this.draftStroke = [];
@@ -5139,7 +5634,39 @@ export class PdfEditor extends LitElement {
   private chooseFile(): void {
     this.menuOpen = false;
     this.wordMenuOpen = false;
-    this.fileInput.click();
+    const picker = (window as unknown as PreviewSavePicker).showOpenFilePicker;
+    if (typeof picker !== 'function') {
+      this.fileInput.click();
+      return;
+    }
+    void picker({
+      multiple: false,
+      types: [
+        {
+          description: 'Documents',
+          accept: {
+            'application/pdf': ['.pdf'],
+            'application/msword': ['.doc'],
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+            'application/vnd.ms-powerpoint': ['.ppt'],
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation': ['.pptx'],
+            'image/png': ['.png'],
+            'image/jpeg': ['.jpg', '.jpeg'],
+          },
+        },
+      ],
+    })
+      .then(async (handles) => {
+        const handle = handles[0];
+        if (!handle?.getFile) return;
+        const file = await handle.getFile();
+        const writable = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf' ? handle : null;
+        await this.load(file, writable);
+      })
+      .catch((error: unknown) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        this.reportError('Could not open this file.', error);
+      });
   }
 
   private onFileChosen(event: Event): void {
@@ -5205,9 +5732,22 @@ export class PdfEditor extends LitElement {
     const target = event.composedPath()[0];
     if (target instanceof HTMLElement && target.closest('input, textarea, select')) return;
     if (this.handleChord(event)) return;
-    if (event.key === 'Enter' && this.shapeKind === 'polygon' && this.draftStroke.length >= 3) {
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !event.repeat && this.pdf && !this.isReadOnlyPreview()) {
+      const tool = ANNOTATE_TOOLS.find((item) => item.shortcut?.toLowerCase() === event.key.toLowerCase());
+      if (tool) {
+        event.preventDefault();
+        this.useAnnotateTool(tool.id);
+        return;
+      }
+    }
+    if (event.key === 'Enter' && (this.shapeKind === 'polygon' || this.shapeKind === 'cloud') && this.draftStroke.length >= 3) {
       event.preventDefault();
-      this.finishPolygon();
+      this.finishCorners(this.shapeKind);
+      return;
+    }
+    if (event.key === 'Enter' && this.shapeKind === 'polyline' && this.draftStroke.length >= 2) {
+      event.preventDefault();
+      this.finishCorners('polyline');
       return;
     }
     if (event.key === 'Enter' && this.measureKind === 'perimeter' && this.draftStroke.length >= 2) {
@@ -5286,10 +5826,18 @@ export class PdfEditor extends LitElement {
       return;
     }
     const kind = this.drawKind;
-    if (this.canDraw && (kind === 'polygon' || kind === 'perimeter' || kind === 'area')) {
+    if (this.canDraw && this.placingCorners) {
       const point = this.canvasPoint(event);
       if (!point) return;
       this.dragStart = point;
+      this.capturePointer(event);
+      return;
+    }
+    if (this.canDraw && kind === 'eraser') {
+      const point = this.canvasPoint(event);
+      if (!point) return;
+      this.dragStart = point;
+      this.eraseAt(point);
       this.capturePointer(event);
       return;
     }
@@ -5300,7 +5848,15 @@ export class PdfEditor extends LitElement {
       this.capturePointer(event);
       return;
     }
-    if (this.canDraw && (kind === 'text' || kind === 'image' || kind === 'stamp' || kind === 'initials' || kind === 'date')) {
+    if (kind && kind !== 'eraser') {
+      const hitId = this.markIdFromEvent(event);
+      const hit = hitId ? this.marks.find((item) => item.id === hitId) : undefined;
+      if (hit?.kind === 'file') {
+        this.downloadDataUrl(hit.src, hit.text || 'attachment');
+        return;
+      }
+    }
+    if (this.canDraw && (kind === 'text' || kind === 'image' || kind === 'stamp' || kind === 'file' || kind === 'initials' || kind === 'date' || (kind === 'signature' && this.mode === 'insert'))) {
       const point = this.canvasPoint(event);
       if (!point) return;
       this.dragStart = point;
@@ -5317,7 +5873,11 @@ export class PdfEditor extends LitElement {
         this.selectedMarkId = null;
         this.replyText = '';
       }
-      if (kind === 'pen' || kind === 'signature') this.draftStroke = [point];
+      if (kind === 'pen' || (kind === 'signature' && this.mode === 'fill-sign') || kind === 'freehand-highlight') this.draftStroke = [point];
+      if (kind === 'arc') {
+        this.draftStroke = [point, point];
+        this.draftArrow = 'none';
+      }
       if (kind === 'callout') {
         this.draftStroke = [point, point];
         this.draftArrow = 'start';
@@ -5332,6 +5892,10 @@ export class PdfEditor extends LitElement {
     if (!this.canDraw && !this.editText && this.pdf) {
       const hitId = this.markIdFromEvent(event);
       const hit = hitId ? this.marks.find((item) => item.id === hitId) : undefined;
+      if (hit?.kind === 'file') {
+        this.downloadDataUrl(hit.src, hit.text || 'attachment');
+        return;
+      }
       if (hit?.kind === 'link') {
         this.selectedMarkId = hit.id;
         this.textSelection = null;
@@ -5364,13 +5928,25 @@ export class PdfEditor extends LitElement {
       this.draftBox = this.boxBetween(this.textSelectStart, point);
       return;
     }
-    if (this.dragStart && this.canDraw && (this.drawKind === 'pen' || this.drawKind === 'signature')) {
+    if (this.dragStart && this.canDraw && this.drawKind === 'eraser') {
+      const point = this.canvasPoint(event);
+      if (point) this.eraseAt(point);
+      return;
+    }
+    if (this.dragStart && this.canDraw && (this.drawKind === 'pen' || (this.drawKind === 'signature' && this.mode === 'fill-sign') || this.drawKind === 'freehand-highlight')) {
       const point = this.canvasPoint(event);
       if (!point) return;
       const last = this.draftStroke[this.draftStroke.length - 1];
       if (!last || Math.hypot(point.x - last.x, point.y - last.y) >= 2) {
         this.draftStroke = [...this.draftStroke, point];
       }
+      return;
+    }
+    if (this.dragStart && this.canDraw && this.drawKind === 'arc') {
+      const point = this.canvasPoint(event);
+      if (!point) return;
+      this.draftStroke = semicircle(this.dragStart, point);
+      this.draftArrow = 'none';
       return;
     }
     if (this.dragStart && this.canDraw && (this.drawKind === 'callout' || this.drawKind === 'line' || this.drawKind === 'arrow' || this.drawKind === 'distance')) {
@@ -5380,7 +5956,7 @@ export class PdfEditor extends LitElement {
       this.draftArrow = this.drawKind === 'callout' ? 'start' : this.drawKind === 'arrow' ? 'end' : 'none';
       return;
     }
-    if (this.canDraw && (this.drawKind === 'polygon' || this.drawKind === 'perimeter' || this.drawKind === 'area') && this.draftStroke.length > 0) {
+    if (this.canDraw && this.placingCorners && this.draftStroke.length > 0) {
       const point = this.canvasPoint(event);
       if (point) this.polygonHover = point;
       return;
@@ -5391,9 +5967,15 @@ export class PdfEditor extends LitElement {
       this.drawKind !== 'text' &&
       this.drawKind !== 'image' &&
       this.drawKind !== 'stamp' &&
+      this.drawKind !== 'file' &&
+      !(this.drawKind === 'signature' && this.mode === 'insert') &&
       this.drawKind !== 'initials' &&
       this.drawKind !== 'date' &&
       this.drawKind !== 'polygon' &&
+      this.drawKind !== 'cloud' &&
+      this.drawKind !== 'polyline' &&
+      this.drawKind !== 'arc' &&
+      this.drawKind !== 'eraser' &&
       this.drawKind !== 'perimeter' &&
       this.drawKind !== 'area'
     ) {
@@ -5453,7 +6035,25 @@ export class PdfEditor extends LitElement {
       }
       if (kind === 'stamp') {
         this.draftBox = null;
-        if (distance < 8) this.openStampMenu(start);
+        if (distance < 8) this.placeArmedStamp(start);
+        return;
+      }
+      if (kind === 'signature' && this.mode === 'insert') {
+        this.draftBox = null;
+        if (distance < 8) this.placeArmedSignature(start);
+        return;
+      }
+      if (kind === 'file') {
+        this.draftBox = null;
+        if (distance < 8 && this.pdf) {
+          this.filePoint = { page: this.currentPage, x: start.x, y: start.y };
+          this.attachInput.click();
+        }
+        return;
+      }
+      if (kind === 'crop') {
+        this.draftBox = null;
+        if (distance >= 4) void this.cropTo(start, point);
         return;
       }
       if (kind === 'link') {
@@ -5465,7 +6065,7 @@ export class PdfEditor extends LitElement {
         return;
       }
       this.draftBox = null;
-      if (kind === 'pen' || kind === 'signature') {
+      if (kind === 'pen' || (kind === 'signature' && this.mode === 'fill-sign') || kind === 'freehand-highlight') {
         const stroke = this.draftStroke;
         this.draftStroke = [];
         if (this.strokeLength(stroke) >= 4) void this.createPen(kind, stroke);
@@ -5486,6 +6086,17 @@ export class PdfEditor extends LitElement {
         if (distance >= 4) void this.addShape(kind, [start, point]);
         return;
       }
+      if (kind === 'arc') {
+        this.draftStroke = [];
+        this.draftArrow = 'none';
+        if (distance >= 4) void this.addShape('arc', semicircle(start, point));
+        return;
+      }
+      if (kind === 'eraser') {
+        this.dragStart = null;
+        this.finishEraseGesture();
+        return;
+      }
       if (kind === 'distance') {
         this.draftStroke = [];
         this.draftArrow = 'none';
@@ -5500,11 +6111,11 @@ export class PdfEditor extends LitElement {
         if (distance >= 4) void this.addFormField(kind, start, point);
         return;
       }
-      if (kind === 'polygon' || kind === 'perimeter' || kind === 'area') {
+      if (kind === 'polygon' || kind === 'cloud' || kind === 'polyline' || kind === 'perimeter' || kind === 'area') {
         if (distance < 8) this.addPolygonCorner(start);
         return;
       }
-      if (kind === 'highlight' || kind === 'underline' || kind === 'strike') {
+      if (kind === 'highlight' || kind === 'underline' || kind === 'squiggly' || kind === 'strike') {
         if (distance >= 4) void this.createMarkup(kind, start, point);
       }
       return;
@@ -5519,15 +6130,23 @@ export class PdfEditor extends LitElement {
     this.draftBox = null;
     this.panPoint = null;
     this.panning = false;
-    if (this.shapeKind === 'polygon' || this.measureKind === 'perimeter' || this.measureKind === 'area') return;
+    this.finishEraseGesture();
+    if (this.placingCorners) return;
     this.draftStroke = [];
     this.draftArrow = 'none';
     this.polygonHover = null;
   }
 
-  private get drawKind(): MarkKind | FormKind | null {
-    if (this.mode === 'annotate') return this.markupKind;
+  private onDoubleClick(event: MouseEvent): void {
+    if (this.shapeKind !== 'polyline' || this.draftStroke.length < 2) return;
+    event.preventDefault();
+    this.finishCorners('polyline');
+  }
+
+  private get drawKind(): MarkKind | FormKind | 'eraser' | 'crop' | null {
     if (this.mode === 'shapes') return this.shapeKind;
+    if (this.shapeKind === 'eraser') return 'eraser';
+    if (this.mode === 'annotate') return this.insertKind === 'text' ? 'text' : this.markupKind;
     if (this.mode === 'insert') return this.insertKind;
     if (this.mode === 'measure') return this.measureKind;
     if (this.mode === 'fill-sign') return this.signKind;
@@ -5539,16 +6158,39 @@ export class PdfEditor extends LitElement {
     return this.drawKind !== null && this.tool !== 'hand' && this.pdf !== null;
   }
 
-  private chooseMarkup(kind: MarkKind): void {
+  private get placingCorners(): boolean {
+    return this.shapeKind === 'polygon' || this.shapeKind === 'cloud' || this.shapeKind === 'polyline' || this.measureKind === 'perimeter' || this.measureKind === 'area';
+  }
+
+  private useAnnotateTool(kind: MarkKind | 'text'): void {
+    this.mode = 'annotate';
     this.cancelDraft();
     this.shapeKind = null;
-    this.insertKind = null;
     this.measureKind = null;
     this.editText = false;
     this.signKind = null;
     this.formKind = null;
-    this.markupKind = this.markupKind === kind ? null : kind;
-    if (this.markupKind) this.tool = 'select';
+    this.lineBoxes = [];
+    this.fieldBoxes = [];
+    if (kind === 'text') {
+      this.markupKind = null;
+      this.insertKind = 'text';
+    } else {
+      this.insertKind = null;
+      this.markupKind = kind;
+    }
+    this.tool = 'select';
+  }
+
+  private chooseAnnotate(kind: MarkKind | 'text'): void {
+    const active = kind === 'text' ? this.insertKind === 'text' && this.markupKind === null : this.markupKind === kind;
+    if (active && this.mode === 'annotate' && this.shapeKind !== 'eraser') {
+      this.cancelDraft();
+      this.markupKind = null;
+      this.insertKind = null;
+      return;
+    }
+    this.useAnnotateTool(kind);
   }
 
   private chooseShape(kind: ShapeKind): void {
@@ -5572,6 +6214,8 @@ export class PdfEditor extends LitElement {
     this.signKind = null;
     this.formKind = null;
     this.insertKind = this.insertKind === kind ? null : kind;
+    if (this.insertKind !== 'stamp') this.armedStampId = null;
+    if (this.insertKind !== 'signature') this.armedSignatureId = null;
     if (this.insertKind) this.tool = 'select';
   }
 
@@ -5705,6 +6349,7 @@ export class PdfEditor extends LitElement {
     if (!draft || !this.pdf) return;
     try {
       const next = await setTextField(await this.ensureBytes(), draft.name, draft.text);
+      this.remember();
       this.pdfBytes = new Uint8Array(next);
       this.formDraft = null;
       await this.swapDocument(this.pdfBytes);
@@ -5717,6 +6362,7 @@ export class PdfEditor extends LitElement {
     if (!this.pdf) return;
     try {
       const next = await toggleCheckBox(await this.ensureBytes(), name);
+      this.remember();
       this.pdfBytes = new Uint8Array(next);
       await this.swapDocument(this.pdfBytes);
     } catch (error) {
@@ -5737,6 +6383,7 @@ export class PdfEditor extends LitElement {
       const bytes = await this.ensureBytes();
       if (this.pdf !== pdf || this.formKind !== kind) return;
       const next = kind === 'text-field' ? await addTextField(bytes, pageNumber, rect) : await addCheckBox(bytes, pageNumber, rect);
+      this.remember();
       this.pdfBytes = new Uint8Array(next);
       await this.swapDocument(this.pdfBytes);
     } catch (error) {
@@ -5765,6 +6412,7 @@ export class PdfEditor extends LitElement {
     if (!text) return;
     try {
       const next = await replaceLineText(await this.ensureBytes(), draft.page, draft.rect, draft.baseline, draft.fontSize, text);
+      this.remember();
       this.pdfBytes = new Uint8Array(next);
       this.textEdits = [
         ...this.textEdits.filter((item) => !(item.page === draft.page && rectsIntersect(item.rect, draft.rect))),
@@ -5845,7 +6493,7 @@ export class PdfEditor extends LitElement {
   }
 
   private async createMarkup(
-    kind: 'highlight' | 'underline' | 'strike',
+    kind: TextStyleKind,
     start: { x: number; y: number },
     end: { x: number; y: number },
   ): Promise<void> {
@@ -5868,7 +6516,7 @@ export class PdfEditor extends LitElement {
     const hit = runs.filter((run) => rectsIntersect(probe, run.rect));
     const rects = hit.length > 0 ? hit.map((run) => run.rect) : [drag];
     const mark = this.makeMark(kind, pageNumber, rects, hit.map((run) => run.text).join(' '));
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     if (this.currentPage === pageNumber) await this.refreshMarkBoxes();
   }
@@ -5962,7 +6610,7 @@ export class PdfEditor extends LitElement {
     const width = Math.max((box?.width ?? 120) / this.scale, 1);
     const height = Math.max((box?.height ?? 24) / this.scale, 1);
     const mark = this.makeMark('freetext', draft.page, [{ x: draft.pdfX, y: draft.pdfY - height, width, height }], text);
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     void this.refreshMarkBoxes();
   }
@@ -6071,7 +6719,7 @@ export class PdfEditor extends LitElement {
   private deleteOnSelection(): void {
     const ids = new Set(this.selectionMarkupIds());
     if (ids.size === 0) return;
-    this.marks = this.marks.filter((mark) => !ids.has(mark.id));
+    this.writeMarks(this.marks.filter((mark) => !ids.has(mark.id)));
     if (this.selectedMarkId && ids.has(this.selectedMarkId)) this.selectedMarkId = null;
     this.checkedCommentIds = this.checkedCommentIds.filter((id) => !ids.has(id));
     this.textSelection = null;
@@ -6106,7 +6754,9 @@ export class PdfEditor extends LitElement {
 
   private defaultInk(kind: MarkKind): { color: string; opacity: number; weight: number } {
     if (kind === 'highlight') return { color: '#f6bf26', opacity: 0.45, weight: 2 };
+    if (kind === 'freehand-highlight') return { color: '#ffe14d', opacity: 0.45, weight: 12 };
     if (kind === 'underline') return { color: '#e37400', opacity: 1, weight: 2 };
+    if (kind === 'squiggly') return { color: '#d93025', opacity: 1, weight: 1.25 };
     if (kind === 'strike') return { color: '#d93025', opacity: 1, weight: 2 };
     return { color: '#202124', opacity: 1, weight: 2 };
   }
@@ -6119,8 +6769,8 @@ export class PdfEditor extends LitElement {
     return `rgba(${(value >> 16) & 255}, ${(value >> 8) & 255}, ${value & 255}, ${amount})`;
   }
 
-  private isTextStyle(kind: MarkKind): kind is 'highlight' | 'underline' | 'strike' {
-    return kind === 'highlight' || kind === 'underline' || kind === 'strike';
+  private isTextStyle(kind: MarkKind): kind is TextStyleKind {
+    return kind === 'highlight' || kind === 'underline' || kind === 'squiggly' || kind === 'strike';
   }
 
   private styleTarget(): Mark | undefined {
@@ -6128,7 +6778,7 @@ export class PdfEditor extends LitElement {
     return marks.find((mark) => mark.id === this.selectedMarkId) ?? marks.at(-1);
   }
 
-  private styleLook(): { kind: 'highlight' | 'underline' | 'strike' | null; color: string; opacity: number; weight: number } {
+  private styleLook(): { kind: TextStyleKind | null; color: string; opacity: number; weight: number } {
     const mark = this.styleTarget();
     if (mark && this.isTextStyle(mark.kind)) {
       return { kind: mark.kind, color: mark.color, opacity: mark.opacity, weight: mark.weight };
@@ -6139,11 +6789,11 @@ export class PdfEditor extends LitElement {
   private updateStyleMark(patch: Partial<Pick<Mark, 'kind' | 'color' | 'opacity' | 'weight'>>): void {
     const target = this.styleTarget();
     if (!target) return;
-    this.marks = this.marks.map((mark) => (mark.id === target.id ? { ...mark, ...patch, modifiedAt: Date.now() } : mark));
+    this.writeMarks(this.marks.map((mark) => (mark.id === target.id ? { ...mark, ...patch, modifiedAt: Date.now() } : mark)));
     void this.refreshMarkBoxes();
   }
 
-  private chooseStyleKind(kind: 'highlight' | 'underline' | 'strike'): void {
+  private chooseStyleKind(kind: TextStyleKind): void {
     const selection = this.textSelection;
     if (!selection) return;
     if (this.styleTarget()) {
@@ -6157,7 +6807,7 @@ export class PdfEditor extends LitElement {
       mark.opacity = this.styleOpacity;
       mark.weight = this.styleWeight;
     }
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     void this.refreshMarkBoxes();
   }
@@ -6206,14 +6856,15 @@ export class PdfEditor extends LitElement {
       createdAt: Date.now(),
       modifiedAt: Date.now(),
     };
-    this.marks = [...this.marks, copy];
+    this.writeMarks([...this.marks, copy]);
     this.selectedMarkId = copy.id;
     void this.refreshMarkBoxes();
   }
 
-  private styleKindLabel(kind: 'highlight' | 'underline' | 'strike' | null): string {
+  private styleKindLabel(kind: TextStyleKind | null): string {
     if (kind === 'highlight') return 'Highlight';
     if (kind === 'underline') return 'Underline';
+    if (kind === 'squiggly') return 'Squiggly';
     if (kind === 'strike') return 'Strikethrough';
     return 'Choose a mark';
   }
@@ -6247,13 +6898,13 @@ export class PdfEditor extends LitElement {
         <section>
           <p class="style-kicker">Mark</p>
           <div class="style-kinds" role="radiogroup" aria-label="Mark">
-            ${MARK_TOOLS.filter((item) => this.isTextStyle(item.id)).map(
+            ${MARK_TOOLS.filter((item): item is { id: TextStyleKind; label: string } => this.isTextStyle(item.id)).map(
               (item) => html`
                 <button
                   type="button"
                   role="radio"
                   aria-checked=${look.kind === item.id}
-                  @click=${() => this.chooseStyleKind(item.id as 'highlight' | 'underline' | 'strike')}
+                  @click=${() => this.chooseStyleKind(item.id)}
                 >
                   ${item.label}
                 </button>
@@ -6493,7 +7144,7 @@ export class PdfEditor extends LitElement {
     });
   }
 
-  private async createPen(kind: 'pen' | 'signature', points: Array<{ x: number; y: number }>): Promise<void> {
+  private async createPen(kind: 'pen' | 'signature' | 'freehand-highlight', points: Array<{ x: number; y: number }>): Promise<void> {
     const pdf = this.pdf;
     const pageNumber = this.currentPage;
     if (!pdf || points.length < 2) return;
@@ -6509,9 +7160,9 @@ export class PdfEditor extends LitElement {
       width: Math.max(Math.max(...xs) - Math.min(...xs), 0.5),
       height: Math.max(Math.max(...ys) - Math.min(...ys), 0.5),
     };
-    const text = kind === 'signature' ? 'Signature' : 'Pen';
+    const text = kind === 'signature' ? 'Signature' : kind === 'freehand-highlight' ? 'Freehand highlight' : 'Pen';
     const mark = this.makeMark(kind, pageNumber, [rect], text, pdfPoints);
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     if (this.currentPage === pageNumber) await this.refreshMarkBoxes();
   }
@@ -6525,7 +7176,7 @@ export class PdfEditor extends LitElement {
       if (this.pdf !== pdf || this.currentPage !== pageNumber || this.signKind !== 'date') return;
       const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
       const mark = this.makeMark('date', pageNumber, [{ x: pdfPoint.x, y: pdfPoint.y, width: 0.01, height: 0.01 }], text);
-      this.marks = [...this.marks, mark];
+      this.writeMarks([...this.marks, mark]);
       this.selectedMarkId = mark.id;
       void this.refreshMarkBoxes();
     });
@@ -6538,12 +7189,12 @@ export class PdfEditor extends LitElement {
     this.polygonHover = point;
   }
 
-  private finishPolygon(): void {
+  private finishCorners(kind: 'polygon' | 'cloud' | 'polyline'): void {
     const corners = this.draftStroke.slice();
-    if (corners.length < 3) return;
+    if (corners.length < (kind === 'polyline' ? 2 : 3)) return;
     this.draftStroke = [];
     this.polygonHover = null;
-    void this.addShape('polygon', corners);
+    void this.addShape(kind, corners);
   }
 
   private finishMeasure(kind: 'perimeter' | 'area'): void {
@@ -6555,7 +7206,7 @@ export class PdfEditor extends LitElement {
   }
 
   private async addShape(
-    kind: ShapeKind,
+    kind: DrawnShape,
     canvasPoints: Array<{ x: number; y: number }>,
   ): Promise<void> {
     const pdf = this.pdf;
@@ -6576,7 +7227,7 @@ export class PdfEditor extends LitElement {
     const text = SHAPE_TOOLS.find((item) => item.id === kind)?.label ?? kind;
     const points = kind === 'rect' || kind === 'ellipse' ? [] : pdfPoints;
     const mark = this.makeMark(kind, pageNumber, [rect], text, points);
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     if (this.currentPage === pageNumber) await this.refreshMarkBoxes();
   }
@@ -6595,7 +7246,7 @@ export class PdfEditor extends LitElement {
     const anchor = this.measureAnchor(kind, pdfPoints);
     const text = kind === 'area' ? this.formatArea(pdfPoints) : this.formatLength(pdfPoints);
     const mark = this.makeMark(kind, pageNumber, [{ x: anchor.x, y: anchor.y, width: 0.01, height: 0.01 }], text, pdfPoints);
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     if (this.currentPage === pageNumber) await this.refreshMarkBoxes();
   }
@@ -6674,7 +7325,7 @@ export class PdfEditor extends LitElement {
       mark = this.makeMark('freetext', draft.page, [anchor], text);
     }
     this.cancelDraft();
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     this.replyText = '';
     this.commentsOpen = true;
@@ -6693,6 +7344,7 @@ export class PdfEditor extends LitElement {
     this.formDraft = null;
     this.stampMenu = null;
     this.imagePoint = null;
+    this.filePoint = null;
     this.draftBox = null;
     this.draftStroke = [];
     this.draftArrow = 'none';
@@ -6805,7 +7457,7 @@ export class PdfEditor extends LitElement {
     const mark = this.makeMark('link', draft.page, rects, stored);
     mark.quote = draft.quote;
     this.cancelDraft();
-    this.marks = [...this.marks, mark];
+    this.writeMarks([...this.marks, mark]);
     this.selectedMarkId = mark.id;
     this.replyText = '';
     this.commentsOpen = true;
@@ -6903,25 +7555,315 @@ export class PdfEditor extends LitElement {
     `;
   }
 
-  private openStampMenu(point: { x: number; y: number }): void {
+  private libraryStamps(): StampStyle[] {
+    return this.customStamps.map((stamp) => ({
+      id: stamp.id,
+      label: stamp.label,
+      shape: 'badge' as const,
+      ink: stamp.ink,
+      fill: stampFill(stamp.ink),
+      text: stamp.ink,
+    }));
+  }
+
+  private stampById(id: string | null): StampStyle | null {
+    if (!id) return null;
+    return STANDARD_STAMPS.find((stamp) => stamp.id === id) ?? this.libraryStamps().find((stamp) => stamp.id === id) ?? null;
+  }
+
+  private armStamp(id: string): void {
+    this.armedStampId = this.armedStampId === id ? null : id;
+    this.insertKind = 'stamp';
+    this.tool = 'select';
+  }
+
+  private placeArmedStamp(point: { x: number; y: number }): void {
+    const style = this.stampById(this.armedStampId);
     const pdf = this.pdf;
     const pageNumber = this.currentPage;
-    if (!pdf) return;
+    if (!style || !pdf) return;
+    const size = stampSize(style);
     void pdf.getPage(pageNumber).then((page) => {
-      if (this.pdf !== pdf || this.currentPage !== pageNumber || this.insertKind !== 'stamp') return;
+      if (this.pdf !== pdf || this.currentPage !== pageNumber) return;
       const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
-      this.stampMenu = { page: pageNumber, pdfX: pdfPoint.x, pdfY: pdfPoint.y, left: point.x, top: point.y };
+      const rect = { x: pdfPoint.x - size.width / 2, y: pdfPoint.y - size.height / 2, width: size.width, height: size.height };
+      const mark = this.makeMark('stamp', pageNumber, [rect], style.label);
+      mark.color = style.ink;
+      this.writeMarks([...this.marks, mark]);
+      this.selectedMarkId = mark.id;
+      void this.refreshMarkBoxes();
     });
   }
 
-  private placeStamp(word: string): void {
-    const menu = this.stampMenu;
-    if (!menu) return;
-    const mark = this.makeMark('stamp', menu.page, [{ x: menu.pdfX, y: menu.pdfY, width: 0.01, height: 0.01 }], word);
-    this.stampMenu = null;
-    this.marks = [...this.marks, mark];
-    this.selectedMarkId = mark.id;
-    void this.refreshMarkBoxes();
+  private createCustomStamp(): void {
+    const label = this.stampLabel.trim().toUpperCase();
+    if (!label) return;
+    const stamp: SavedStamp = { id: `custom-${Date.now()}`, label, ink: this.stampInk };
+    this.customStamps = [stamp, ...this.customStamps];
+    this.armedStampId = stamp.id;
+    this.stampDialog = false;
+    this.stampLabel = '';
+    this.storeLibrary();
+  }
+
+  private armSignature(id: string): void {
+    this.armedSignatureId = this.armedSignatureId === id ? null : id;
+    this.insertKind = 'signature';
+    this.tool = 'select';
+  }
+
+  private deleteSignature(id: string): void {
+    this.savedSignatures = this.savedSignatures.filter((item) => item.id !== id);
+    if (this.armedSignatureId === id) this.armedSignatureId = null;
+    this.storeLibrary();
+  }
+
+  private placeArmedSignature(point: { x: number; y: number }): void {
+    const saved = this.savedSignatures.find((item) => item.id === this.armedSignatureId);
+    const pdf = this.pdf;
+    const pageNumber = this.currentPage;
+    if (!saved || !pdf) return;
+    const image = new Image();
+    image.onload = () => {
+      if (this.pdf !== pdf) return;
+      const width = 160;
+      const ratio = image.naturalWidth > 0 ? image.naturalHeight / image.naturalWidth : 0.35;
+      const height = Math.max(36, width * ratio);
+      void pdf.getPage(pageNumber).then((page) => {
+        if (this.pdf !== pdf || this.currentPage !== pageNumber) return;
+        const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
+        const rect = { x: pdfPoint.x - width / 2, y: pdfPoint.y - height / 2, width, height };
+        const mark = this.makeMark('signature', pageNumber, [rect], 'Signature', [], saved.src);
+        this.writeMarks([...this.marks, mark]);
+        this.selectedMarkId = mark.id;
+        void this.refreshMarkBoxes();
+      });
+    };
+    image.src = saved.src;
+  }
+
+  private openSignatureDialog(): void {
+    this.signatureStrokes = [];
+    this.signatureHasInk = false;
+    this.signatureUpload = '';
+    this.signatureMode = 'draw';
+    this.signatureColor = '#202124';
+    this.signatureText = this.authorName === 'Guest' ? '' : this.authorName;
+    this.signatureOpen = true;
+  }
+
+  private signPoint(event: PointerEvent): { x: number; y: number } | null {
+    const canvas = event.currentTarget;
+    if (!(canvas instanceof HTMLCanvasElement)) return null;
+    const bounds = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(bounds.width, 1);
+    const scaleY = canvas.height / Math.max(bounds.height, 1);
+    return { x: (event.clientX - bounds.left) * scaleX, y: (event.clientY - bounds.top) * scaleY };
+  }
+
+  private onSignDown(event: PointerEvent): void {
+    const point = this.signPoint(event);
+    if (!point) return;
+    this.signatureStrokes = [...this.signatureStrokes, { color: this.signatureColor, points: [point] }];
+    this.signatureHasInk = true;
+    const canvas = event.currentTarget;
+    if (canvas instanceof HTMLCanvasElement) {
+      try {
+        canvas.setPointerCapture(event.pointerId);
+      } catch {
+        // Synthetic events have nothing to capture.
+      }
+    }
+    this.paintSignaturePad();
+  }
+
+  private onSignMove(event: PointerEvent): void {
+    if (event.buttons === 0 || this.signatureStrokes.length === 0) return;
+    const point = this.signPoint(event);
+    if (!point) return;
+    const strokes = this.signatureStrokes.map((stroke, index) =>
+      index === this.signatureStrokes.length - 1 ? { ...stroke, points: [...stroke.points, point] } : stroke,
+    );
+    this.signatureStrokes = strokes;
+    this.paintSignaturePad();
+  }
+
+  private paintSignaturePad(): void {
+    const canvas = this.renderRoot.querySelector('.sign-pad');
+    if (!(canvas instanceof HTMLCanvasElement)) return;
+    const bounds = canvas.getBoundingClientRect();
+    const width = Math.floor(bounds.width);
+    const height = Math.floor(bounds.height);
+    if (width < 20 || height < 20) return;
+    if (canvas.width !== width || canvas.height !== height) {
+      const scaleX = width / Math.max(canvas.width, 1);
+      const scaleY = height / Math.max(canvas.height, 1);
+      if (canvas.width > 0 && (Math.abs(scaleX - 1) > 0.01 || Math.abs(scaleY - 1) > 0.01)) {
+        this.signatureStrokes = this.signatureStrokes.map((stroke) => ({
+          ...stroke,
+          points: stroke.points.map((point) => ({ x: point.x * scaleX, y: point.y * scaleY })),
+        }));
+      }
+      canvas.width = width;
+      canvas.height = height;
+    }
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.lineWidth = 2.4;
+    for (const stroke of this.signatureStrokes) {
+      if (stroke.points.length === 0) continue;
+      context.strokeStyle = stroke.color;
+      context.beginPath();
+      context.moveTo(stroke.points[0].x, stroke.points[0].y);
+      for (const point of stroke.points.slice(1)) context.lineTo(point.x, point.y);
+      context.stroke();
+    }
+    const button = this.renderRoot.querySelector('.sign-tools .primary');
+    if (button instanceof HTMLButtonElement) button.disabled = !this.signatureReady();
+  }
+
+  private clearSignaturePad(): void {
+    this.signatureStrokes = [];
+    this.signatureHasInk = false;
+    this.signatureUpload = '';
+    this.signatureText = '';
+    this.paintSignaturePad();
+  }
+
+  private readSignatureFile(file: File): void {
+    if (!file.type.startsWith('image/')) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      this.signatureUpload = typeof reader.result === 'string' ? reader.result : '';
+      this.signatureMode = 'upload';
+    };
+    reader.readAsDataURL(file);
+  }
+
+  private signatureReady(): boolean {
+    if (this.signatureMode === 'draw') return this.signatureHasInk;
+    if (this.signatureMode === 'type') return this.signatureText.trim().length > 0;
+    return this.signatureUpload.startsWith('data:image/');
+  }
+
+  private createSignature(): void {
+    const src = this.signatureMode === 'upload' ? this.signatureUpload : this.signatureMode === 'type' ? this.typedSignature() : this.drawnSignature();
+    if (!src) return;
+    const saved: SavedSignature = { id: `sign-${Date.now()}`, name: this.signatureText.trim() || 'Signature', src };
+    this.savedSignatures = [saved, ...this.savedSignatures];
+    this.armedSignatureId = saved.id;
+    this.insertKind = 'signature';
+    this.signatureOpen = false;
+    this.storeLibrary();
+  }
+
+  private drawnSignature(): string {
+    const canvas = this.renderRoot.querySelector('.sign-pad');
+    return canvas instanceof HTMLCanvasElement ? canvas.toDataURL('image/png') : '';
+  }
+
+  private typedSignature(): string {
+    const text = this.signatureText.trim();
+    if (!text) return '';
+    const canvas = document.createElement('canvas');
+    canvas.width = 640;
+    canvas.height = 180;
+    const context = canvas.getContext('2d');
+    if (!context) return '';
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = this.signatureColor;
+    context.font = `64px ${this.signatureFont}`;
+    context.textBaseline = 'middle';
+    context.fillText(text, 16, 90);
+    return canvas.toDataURL('image/png');
+  }
+
+  private async cropTo(start: { x: number; y: number }, end: { x: number; y: number }): Promise<void> {
+    const pdf = this.pdf;
+    const pageNumber = this.currentPage;
+    if (!pdf) return;
+    try {
+      const page = await pdf.getPage(pageNumber);
+      if (this.pdf !== pdf) return;
+      const from = viewportToPdf(this.viewportOf(page), start.x, start.y);
+      const to = viewportToPdf(this.viewportOf(page), end.x, end.y);
+      const next = await cropDocumentPage(await this.ensureBytes(), pageNumber, pdfRectFromPoints(from.x, from.y, to.x, to.y));
+      this.remember();
+      this.pdfBytes = new Uint8Array(next);
+      await this.swapDocument(this.pdfBytes);
+    } catch (error) {
+      this.reportError('Could not crop this page.', error);
+    }
+  }
+
+  private onAttachmentChosen(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    const point = this.filePoint;
+    this.filePoint = null;
+    if (!file || !point || this.insertKind !== 'file') return;
+    const pdf = this.pdf;
+    if (!pdf) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const src = typeof reader.result === 'string' ? reader.result : '';
+      if (!src) return;
+      void pdf.getPage(point.page).then((page) => {
+        if (this.pdf !== pdf) return;
+        const pdfPoint = viewportToPdf(this.viewportOf(page), point.x, point.y);
+        const rect = { x: pdfPoint.x - 12, y: pdfPoint.y - 16, width: 24, height: 32 };
+        const mark = this.makeMark('file', point.page, [rect], file.name, [], src);
+        this.writeMarks([...this.marks, mark]);
+        this.selectedMarkId = mark.id;
+        if (this.currentPage === point.page) void this.refreshMarkBoxes();
+      });
+    };
+    reader.readAsDataURL(file);
+  }
+
+  private downloadDataUrl(src: string, name: string): void {
+    if (!src) return;
+    const link = document.createElement('a');
+    link.href = src;
+    link.download = name || 'attachment';
+    link.click();
+  }
+
+  private loadLibrary(): void {
+    try {
+      const stamps = JSON.parse(localStorage.getItem(LIBRARY_STAMPS) || '[]') as unknown;
+      if (Array.isArray(stamps)) {
+        this.customStamps = stamps.filter((item): item is SavedStamp => {
+          if (!item || typeof item !== 'object') return false;
+          const stamp = item as SavedStamp;
+          return typeof stamp.id === 'string' && typeof stamp.label === 'string' && typeof stamp.ink === 'string';
+        });
+      }
+      const signatures = JSON.parse(localStorage.getItem(LIBRARY_SIGNATURES) || '[]') as unknown;
+      if (Array.isArray(signatures)) {
+        this.savedSignatures = signatures.filter((item): item is SavedSignature => {
+          if (!item || typeof item !== 'object') return false;
+          const signature = item as SavedSignature;
+          return typeof signature.id === 'string' && typeof signature.name === 'string' && typeof signature.src === 'string';
+        });
+      }
+    } catch {
+      this.customStamps = [];
+      this.savedSignatures = [];
+    }
+  }
+
+  private storeLibrary(): void {
+    try {
+      localStorage.setItem(LIBRARY_STAMPS, JSON.stringify(this.customStamps));
+      localStorage.setItem(LIBRARY_SIGNATURES, JSON.stringify(this.savedSignatures));
+    } catch {
+      // The library still works for this session when storage is unavailable.
+    }
   }
 
   private onImageChosen(event: Event): void {
@@ -6948,7 +7890,7 @@ export class PdfEditor extends LitElement {
           const height = Math.max(width * ratio, 1);
           const rect = { x: pdfPoint.x, y: pdfPoint.y - height, width, height };
           const mark = this.makeMark('image', point.page, [rect], file.name, [], src);
-          this.marks = [...this.marks, mark];
+          this.writeMarks([...this.marks, mark]);
           this.selectedMarkId = mark.id;
           if (this.currentPage === point.page) void this.refreshMarkBoxes();
         };
@@ -7009,7 +7951,7 @@ export class PdfEditor extends LitElement {
       if (this.appliedFilter.filterDocument && !this.matchesFilter(mark)) continue;
       const selected = mark.id === this.selectedMarkId;
       const label = mark.kind === 'note' ? String(noteNumbers.get(mark.id) ?? '') : '';
-      if (mark.kind === 'pen' || mark.kind === 'signature' || mark.kind === 'callout' || mark.kind === 'freetext' || mark.kind === 'text' || mark.kind === 'stamp' || mark.kind === 'initials' || mark.kind === 'date' || mark.kind === 'line' || mark.kind === 'arrow' || mark.kind === 'polygon' || mark.kind === 'distance' || mark.kind === 'perimeter' || mark.kind === 'area') {
+      if (mark.kind === 'pen' || mark.kind === 'signature' || mark.kind === 'callout' || mark.kind === 'freetext' || mark.kind === 'text' || mark.kind === 'stamp' || mark.kind === 'initials' || mark.kind === 'date' || mark.kind === 'line' || mark.kind === 'arrow' || mark.kind === 'polygon' || mark.kind === 'arc' || mark.kind === 'cloud' || mark.kind === 'polyline' || mark.kind === 'freehand-highlight' || mark.kind === 'distance' || mark.kind === 'perimeter' || mark.kind === 'area') {
         const points = mark.points.map((point) => {
           const [x, y] = viewport.convertToViewportPoint(point.x, point.y);
           return { x, y };
@@ -7037,7 +7979,7 @@ export class PdfEditor extends LitElement {
           kind: mark.kind,
           selected,
           label,
-          text: mark.kind === 'link' ? mark.text : '',
+          text: mark.kind === 'link' || mark.kind === 'file' ? mark.text : '',
           points: [],
           src: mark.src,
           color: mark.color,
@@ -7070,8 +8012,136 @@ export class PdfEditor extends LitElement {
     else void this.refreshMarkBoxes();
   }
 
+  private writeMarks(next: Mark[]): void {
+    this.remember();
+    this.marks = next;
+  }
+
+  private snapshot(): EditorSnapshot {
+    return {
+      marks: this.marks.map((mark) => ({
+        ...mark,
+        rects: mark.rects.map((rect) => ({ ...rect })),
+        points: mark.points.map((point) => ({ ...point })),
+        replies: mark.replies.map((reply) => ({ ...reply })),
+      })),
+      pdfBytes: this.pdfBytes ? this.pdfBytes.slice() : null,
+      textEdits: this.textEdits.map((edit) => ({ ...edit, rect: { ...edit.rect } })),
+    };
+  }
+
+  private remember(): void {
+    if (this.historyLock || !this.pdf) return;
+    this.past.push(this.snapshot());
+    if (this.past.length > 40) this.past.shift();
+    this.future = [];
+    this.undoCount = this.past.length;
+    this.redoCount = 0;
+  }
+
+  private sameBytes(left: Uint8Array | null, right: Uint8Array | null): boolean {
+    if (left === right) return true;
+    if (!left || !right || left.byteLength !== right.byteLength) return false;
+    for (let index = 0; index < left.byteLength; index += 1) {
+      if (left[index] !== right[index]) return false;
+    }
+    return true;
+  }
+
+  private undo(): void {
+    if (this.undoCount === 0 || this.historyLock || !this.pdf) return;
+    const previous = this.past.pop();
+    if (!previous) return;
+    this.future.push(this.snapshot());
+    this.undoCount = this.past.length;
+    this.redoCount = this.future.length;
+    this.cancelDraft();
+    void this.applySnapshot(previous);
+  }
+
+  private redo(): void {
+    if (this.redoCount === 0 || this.historyLock || !this.pdf) return;
+    const next = this.future.pop();
+    if (!next) return;
+    this.past.push(this.snapshot());
+    this.undoCount = this.past.length;
+    this.redoCount = this.future.length;
+    this.cancelDraft();
+    void this.applySnapshot(next);
+  }
+
+  private async applySnapshot(snap: EditorSnapshot): Promise<void> {
+    this.historyLock = true;
+    const bytesChanged = !this.sameBytes(this.pdfBytes, snap.pdfBytes);
+    this.marks = snap.marks.map((mark) => ({
+      ...mark,
+      rects: mark.rects.map((rect) => ({ ...rect })),
+      points: mark.points.map((point) => ({ ...point })),
+      replies: mark.replies.map((reply) => ({ ...reply })),
+    }));
+    this.textEdits = snap.textEdits.map((edit) => ({ ...edit, rect: { ...edit.rect } }));
+    this.selectedMarkId = null;
+    this.editingCommentId = null;
+    try {
+      if (bytesChanged && snap.pdfBytes) {
+        this.pdfBytes = new Uint8Array(snap.pdfBytes);
+        await this.swapDocument(this.pdfBytes);
+        this.totalPages = this.pdf?.numPages ?? this.totalPages;
+        if (this.currentPage > this.totalPages) this.currentPage = Math.max(this.totalPages, 1);
+      }
+    } finally {
+      this.historyLock = false;
+      this.undoCount = this.past.length;
+      this.redoCount = this.future.length;
+    }
+    await this.refreshMarkBoxes();
+    if (this.canEditText) void this.refreshTextLines();
+  }
+
+  private hitsMark(box: MarkBox, point: { x: number; y: number }): boolean {
+    const pad = 8;
+    if (box.points.length > 1) {
+      const stroke = box.kind === 'cloud' ? cloudOutline(box.points, Math.max(6, 8 * this.scale)) : box.points;
+      for (let index = 1; index < stroke.length; index += 1) {
+        if (distanceToSegment(point, stroke[index - 1], stroke[index]) <= pad) return true;
+      }
+      const closed = box.kind === 'polygon' || box.kind === 'cloud' || box.kind === 'area' || box.kind === 'rect';
+      if (closed && stroke.length > 2 && distanceToSegment(point, stroke[stroke.length - 1], stroke[0]) <= pad) return true;
+      if ((box.kind === 'polygon' || box.kind === 'cloud' || box.kind === 'area') && pointInPolygon(point, stroke)) return true;
+      return false;
+    }
+    if (box.kind === 'ellipse') {
+      const rx = Math.max(box.width / 2, 1);
+      const ry = Math.max(box.height / 2, 1);
+      const nx = (point.x - (box.left + box.width / 2)) / rx;
+      const ny = (point.y - (box.top + box.height / 2)) / ry;
+      return nx * nx + ny * ny <= 1.15;
+    }
+    return point.x >= box.left - pad && point.x <= box.left + box.width + pad && point.y >= box.top - pad && point.y <= box.top + box.height + pad;
+  }
+
+  private eraseAt(point: { x: number; y: number }): void {
+    const ids = new Set(this.markBoxes.filter((box) => this.hitsMark(box, point)).map((box) => box.id));
+    if (ids.size === 0) return;
+    if (!this.eraseGesture) {
+      this.remember();
+      this.eraseGesture = true;
+      this.historyLock = true;
+    }
+    this.writeMarks(this.marks.filter((mark) => !ids.has(mark.id)));
+    if (this.selectedMarkId && ids.has(this.selectedMarkId)) this.selectedMarkId = null;
+    this.checkedCommentIds = this.checkedCommentIds.filter((id) => !ids.has(id));
+    void this.refreshMarkBoxes();
+  }
+
+  private finishEraseGesture(): void {
+    if (!this.eraseGesture) return;
+    this.eraseGesture = false;
+    this.historyLock = false;
+  }
+
   private deleteMark(id: string): void {
-    this.marks = this.marks.filter((mark) => mark.id !== id);
+    this.writeMarks(this.marks.filter((mark) => mark.id !== id));
     if (this.selectedMarkId === id) this.selectedMarkId = null;
     if (this.editingCommentId === id) this.cancelEditComment();
     this.checkedCommentIds = this.checkedCommentIds.filter((item) => item !== id);
@@ -7116,6 +8186,7 @@ export class PdfEditor extends LitElement {
         return 5;
       case 'note':
       case 'underline':
+      case 'squiggly':
         return 6;
       case 'strike':
         return 7;
@@ -7225,9 +8296,9 @@ export class PdfEditor extends LitElement {
       createdAt: Date.now(),
       text,
     };
-    this.marks = this.marks.map((mark) =>
+    this.writeMarks(this.marks.map((mark) =>
       mark.id === markId ? { ...mark, replies: [...mark.replies, reply], modifiedAt: Date.now() } : mark,
-    );
+    ));
     this.replyText = '';
   }
 
@@ -7377,6 +8448,7 @@ export class PdfEditor extends LitElement {
     switch (mark.kind) {
       case 'highlight':
       case 'underline':
+      case 'squiggly':
       case 'strike':
         return mark.color;
       case 'note':
@@ -7592,11 +8664,11 @@ export class PdfEditor extends LitElement {
 
   private applyCommentAction(id: string, action: CommentAction): void {
     const modifiedAt = Date.now();
-    this.marks = this.marks.map((mark) => {
+    this.writeMarks(this.marks.map((mark) => {
       if (mark.id !== id) return mark;
       if (action === 'marked' || action === 'unmarked') return { ...mark, marked: action === 'marked', modifiedAt };
       return { ...mark, status: action, modifiedAt };
-    });
+    }));
     this.closeCommentMenus();
   }
 
@@ -7612,7 +8684,7 @@ export class PdfEditor extends LitElement {
     const id = this.editingCommentId;
     const text = this.editingCommentText.trim();
     if (!id || !text) return;
-    this.marks = this.marks.map((mark) => (mark.id === id ? { ...mark, text, modifiedAt: Date.now() } : mark));
+    this.writeMarks(this.marks.map((mark) => (mark.id === id ? { ...mark, text, modifiedAt: Date.now() } : mark)));
     this.editingCommentId = null;
     this.editingCommentText = '';
   }
@@ -7643,7 +8715,7 @@ export class PdfEditor extends LitElement {
   private deleteChecked(): void {
     const ids = new Set(this.checkedCommentIds);
     if (ids.size === 0) return;
-    this.marks = this.marks.filter((mark) => !ids.has(mark.id));
+    this.writeMarks(this.marks.filter((mark) => !ids.has(mark.id)));
     if (this.selectedMarkId && ids.has(this.selectedMarkId)) this.selectedMarkId = null;
     if (this.editingCommentId && ids.has(this.editingCommentId)) this.cancelEditComment();
     this.checkedCommentIds = [];
@@ -7832,10 +8904,47 @@ export class PdfEditor extends LitElement {
   }
 
   private markFace(box: MarkBox) {
-    if (box.kind === 'pen' || box.kind === 'signature' || box.kind === 'line' || box.kind === 'arrow' || box.kind === 'rect' || box.kind === 'ellipse' || box.kind === 'polygon') {
+    if (box.kind === 'signature' && box.src) {
+      return html`
+        <div
+          class="mark image ${box.selected ? 'selected' : ''}"
+          data-mark=${box.id}
+          style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"
+        >
+          <img src=${box.src} alt="" />
+        </div>
+      `;
+    }
+    if (box.kind === 'stamp') {
+      const style = stampStyle(box.text, box.color);
+      const glyph = style.shape === 'check' ? '✓' : style.shape === 'cross' ? '✕' : style.label;
+      return html`
+        <div
+          class="mark stamp ${style.shape} ${box.selected ? 'selected' : ''}"
+          data-mark=${box.id}
+          style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px;font-size:${Math.max(8, 9 * this.scale)}px;--stamp-ink:${style.ink};--stamp-fill:${style.fill};--stamp-text:${style.text};color:${style.text};background:${style.fill};border-color:${style.ink}"
+        >
+          ${glyph}
+        </div>
+      `;
+    }
+    if (box.kind === 'file') {
+      return html`
+        <div
+          class="mark file ${box.selected ? 'selected' : ''}"
+          data-mark=${box.id}
+          style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px"
+        >
+          <svg viewBox="0 0 24 32" aria-hidden="true" fill="none" stroke="#202124" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 14.5 15.2 8.2a2.4 2.4 0 0 1 3.4 3.4l-8 8.1a3.4 3.4 0 0 1-4.8-4.8l7.2-7.3"></path>
+          </svg>
+        </div>
+      `;
+    }
+    if (box.kind === 'pen' || box.kind === 'signature' || box.kind === 'line' || box.kind === 'arrow' || box.kind === 'rect' || box.kind === 'ellipse' || box.kind === 'polygon' || box.kind === 'arc' || box.kind === 'cloud' || box.kind === 'polyline' || box.kind === 'freehand-highlight') {
       return nothing;
     }
-    if (box.kind === 'freetext' || box.kind === 'callout' || box.kind === 'text' || box.kind === 'stamp' || box.kind === 'distance' || box.kind === 'perimeter' || box.kind === 'area' || box.kind === 'initials' || box.kind === 'date') {
+    if (box.kind === 'freetext' || box.kind === 'callout' || box.kind === 'text' || box.kind === 'distance' || box.kind === 'perimeter' || box.kind === 'area' || box.kind === 'initials' || box.kind === 'date') {
       const fontSize = box.kind === 'initials' ? 18 : 12;
       return html`
         <div
@@ -7867,27 +8976,57 @@ export class PdfEditor extends LitElement {
         ></div>
       `;
     }
-    const inked = box.kind === 'highlight' || box.kind === 'underline' || box.kind === 'strike';
+    const inked = box.kind === 'highlight' || box.kind === 'underline' || box.kind === 'squiggly' || box.kind === 'strike';
     const tint = inked ? this.fadeColor(box.color, box.opacity) : '';
     const thickness = inked ? Math.max(box.weight, box.weight * this.scale) : 0;
+    const waveWidth = Math.max(4, box.width);
     return html`
       <div
         class="mark ${box.kind} ${box.selected ? 'selected' : ''}"
         data-mark=${box.id}
         style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px${inked ? `;--mark-fill:${tint};--mark-ink:${tint};--mark-weight:${thickness}px` : ''}"
-      ></div>
+      >
+        ${box.kind === 'squiggly'
+          ? html`<svg class="squiggle" width=${waveWidth} height="6" viewBox="0 0 ${waveWidth} 6">
+              <path d=${this.wavePath(waveWidth)} fill="none" stroke=${box.color} stroke-width="1.4" stroke-linecap="round"></path>
+            </svg>`
+          : nothing}
+      </div>
     `;
   }
+
+  private wavePath(width: number): string {
+    const step = 6;
+    let path = 'M0 4';
+    for (let x = 0; x < width; x += step) path += ` q ${step / 4} -3 ${step / 2} 0 t ${step / 2} 0`;
+    return path;
+  }
+
+  private onBarTip = (event: PointerEvent): void => {
+    if (event.type === 'pointerout') {
+      const next = event.relatedTarget instanceof Element ? event.relatedTarget.closest('button[data-tip]') : null;
+      if (next) return;
+      this.tip = null;
+      return;
+    }
+    const button = event.target instanceof Element ? event.target.closest('button[data-tip]') : null;
+    if (!(button instanceof HTMLElement)) return;
+    const text = button.dataset.tip ?? '';
+    if (!text) return;
+    const box = button.getBoundingClientRect();
+    this.tip = { text, left: box.left + box.width / 2, top: box.bottom + 8 };
+  };
 
   private inkSvg() {
     const width = Math.max(1, 1.5 * this.scale);
     const signWidth = Math.max(1.5, 2.25 * this.scale);
     const preview =
-      (this.shapeKind === 'polygon' || this.measureKind === 'perimeter' || this.measureKind === 'area') && this.polygonHover && this.draftStroke.length > 0
+      this.placingCorners && this.polygonHover && this.draftStroke.length > 0
         ? [...this.draftStroke, this.polygonHover]
         : this.draftStroke;
-    const draftColor = this.measureKind || this.signKind === 'signature' ? '#1a73e8' : '#202124';
-    const draftWidth = this.signKind === 'signature' ? signWidth : width;
+    const highlightDraft = this.shapeKind === 'freehand-highlight';
+    const draftColor = highlightDraft ? this.fadeColor('#ffe14d', 0.45) : this.measureKind || this.signKind === 'signature' ? '#1a73e8' : '#202124';
+    const draftWidth = highlightDraft ? Math.max(8, 12 * this.scale) : this.signKind === 'signature' ? signWidth : width;
     const draftShape = this.shapeKind === 'rect' || this.shapeKind === 'ellipse' ? this.shapeKind : null;
     return svg`
       <svg class="ink">
@@ -7902,10 +9041,16 @@ export class PdfEditor extends LitElement {
           if (box.kind === 'rect' || box.kind === 'ellipse') return this.inkOutline(box, box.kind, box, width);
           if (box.kind === 'area' && box.points.length > 2) return this.inkPolygon(box, width, '#1a73e8', 'rgba(26, 115, 232, 0.12)');
           if (box.kind === 'polygon' && box.points.length > 2) return this.inkPolygon(box, width);
+          if (box.kind === 'cloud' && box.points.length > 2) return this.inkCloud(box, width);
           if (box.points.length > 1) {
             const arrow: ArrowEnd = box.kind === 'callout' ? 'start' : box.kind === 'arrow' ? 'end' : 'none';
-            const color = box.kind === 'distance' || box.kind === 'perimeter' || box.kind === 'signature' ? '#1a73e8' : '#202124';
-            const stroke = box.kind === 'signature' ? signWidth : width;
+            const highlight = box.kind === 'freehand-highlight';
+            const color = highlight
+              ? this.fadeColor(box.color, box.opacity)
+              : box.kind === 'distance' || box.kind === 'perimeter' || box.kind === 'signature'
+                ? '#1a73e8'
+                : '#202124';
+            const stroke = highlight ? Math.max(8, box.weight * this.scale) : box.kind === 'signature' ? signWidth : width;
             return this.inkLine(box.points, box, arrow, stroke, color);
           }
           return nothing;
@@ -7947,6 +9092,20 @@ export class PdfEditor extends LitElement {
       <polygon points=${pts} fill=${fill} stroke="none" pointer-events="none"></polygon>
       <polygon points=${pts} fill="transparent" stroke="transparent" stroke-width=${Math.max(12, width * 4)} stroke-linejoin="round" pointer-events="all" data-mark=${box.id}></polygon>
       <polyline points=${closed} fill="none" stroke=${stroke} stroke-width=${width} stroke-linejoin="round" stroke-linecap="round" pointer-events="none"></polyline>
+    `;
+  }
+
+  private inkCloud(box: MarkBox, width: number): SVGTemplateResult {
+    const outline = cloudOutline(box.points, Math.max(6, 8 * this.scale));
+    if (outline.length < 3) return svg``;
+    const pts = outline.map((point) => `${point.x},${point.y}`).join(' ');
+    const closed = `${pts} ${outline[0].x},${outline[0].y}`;
+    return svg`
+      ${box.selected
+        ? svg`<polyline points=${closed} fill="none" stroke="#1a73e8" stroke-width=${width + 4} stroke-linejoin="round" stroke-linecap="round" pointer-events="none"></polyline>`
+        : nothing}
+      <polygon points=${pts} fill="transparent" stroke="transparent" stroke-width=${Math.max(12, width * 4)} stroke-linejoin="round" pointer-events="all" data-mark=${box.id}></polygon>
+      <polyline points=${closed} fill="none" stroke="#202124" stroke-width=${width} stroke-linejoin="round" stroke-linecap="round" pointer-events="none"></polyline>
     `;
   }
 
@@ -8125,33 +9284,39 @@ export class PdfEditor extends LitElement {
 
   private async commitPages(bytes: Uint8Array, mapping: Map<number, number>, nextPage: number): Promise<void> {
     const hadPicks = this.pagePicks.length > 0;
-    this.pdfBytes = new Uint8Array(bytes);
-    this.marks = this.marks.flatMap((mark) => {
-      const page = mapping.get(mark.page);
-      return page ? [{ ...mark, page }] : [];
-    });
-    this.textEdits = this.textEdits.flatMap((edit) => {
-      const page = mapping.get(edit.page);
-      return page ? [{ ...edit, page }] : [];
-    });
-    this.pageBookmarks = this.pageBookmarks.flatMap((item) => {
-      const page = mapping.get(item.page);
-      return page ? [{ ...item, page }] : [];
-    });
-    if (this.bookmarkDraft) {
-      const page = mapping.get(this.bookmarkDraft.page);
-      this.bookmarkDraft = page ? { ...this.bookmarkDraft, page } : null;
+    this.remember();
+    this.historyLock = true;
+    try {
+      this.pdfBytes = new Uint8Array(bytes);
+      this.marks = this.marks.flatMap((mark) => {
+        const page = mapping.get(mark.page);
+        return page ? [{ ...mark, page }] : [];
+      });
+      this.textEdits = this.textEdits.flatMap((edit) => {
+        const page = mapping.get(edit.page);
+        return page ? [{ ...edit, page }] : [];
+      });
+      this.pageBookmarks = this.pageBookmarks.flatMap((item) => {
+        const page = mapping.get(item.page);
+        return page ? [{ ...item, page }] : [];
+      });
+      if (this.bookmarkDraft) {
+        const page = mapping.get(this.bookmarkDraft.page);
+        this.bookmarkDraft = page ? { ...this.bookmarkDraft, page } : null;
+      }
+      this.pagePicks = [...new Set(this.pagePicks.flatMap((page) => {
+        const next = mapping.get(page);
+        return next ? [next] : [];
+      }))].sort((a, b) => a - b);
+      if (hadPicks) this.pageListDraft = this.pagePicks.join(', ');
+      await this.swapDocument(this.pdfBytes);
+      this.totalPages = this.pdf?.numPages ?? 0;
+      const focus = Math.min(Math.max(nextPage, 1), Math.max(this.totalPages, 1));
+      if (focus !== this.currentPage) this.goToPage(focus);
+      void this.updateComplete.then(() => this.observeThumbnails());
+    } finally {
+      this.historyLock = false;
     }
-    this.pagePicks = [...new Set(this.pagePicks.flatMap((page) => {
-      const next = mapping.get(page);
-      return next ? [next] : [];
-    }))].sort((a, b) => a - b);
-    if (hadPicks) this.pageListDraft = this.pagePicks.join(', ');
-    await this.swapDocument(this.pdfBytes);
-    this.totalPages = this.pdf?.numPages ?? 0;
-    const focus = Math.min(Math.max(nextPage, 1), Math.max(this.totalPages, 1));
-    if (focus !== this.currentPage) this.goToPage(focus);
-    void this.updateComplete.then(() => this.observeThumbnails());
   }
 
   private async runPageEdit(work: () => Promise<void>, fallback: string): Promise<void> {
@@ -8842,6 +10007,150 @@ export class PdfEditor extends LitElement {
     `;
   }
 
+  private stampButton(style: StampStyle) {
+    const glyph = style.shape === 'check' ? '✓' : style.shape === 'cross' ? '✕' : style.label;
+    return html`
+      <button type="button" class="stamp-choice" aria-pressed=${this.armedStampId === style.id} aria-label=${style.label} @click=${() => this.armStamp(style.id)}>
+        <span class="stamp-face ${style.shape}" style="color:${style.text};background:${style.fill};border-color:${style.shape === 'arrow' ? 'transparent' : style.ink}">${glyph}</span>
+      </button>
+    `;
+  }
+
+  private stampPanel() {
+    const custom = this.libraryStamps();
+    return html`
+      <aside class="insert-panel" aria-label="Stamps">
+        <h2>Stamps</h2>
+        <div class="panel-scroll">
+          <button type="button" class="panel-create" @click=${() => { this.stampDialog = true; this.stampLabel = ''; }}>Create New Stamp</button>
+          ${custom.length
+            ? html`
+                <p class="panel-fold">Custom</p>
+                ${custom.map((stamp) => this.stampButton(stamp))}
+              `
+            : null}
+          <button type="button" class="panel-fold" aria-expanded=${this.standardStampsOpen} @click=${() => { this.standardStampsOpen = !this.standardStampsOpen; }}>
+            <span>Standard Stamps</span>
+            <span>${this.standardStampsOpen ? '⌃' : '⌄'}</span>
+          </button>
+          ${this.standardStampsOpen ? STANDARD_STAMPS.map((stamp) => this.stampButton(stamp)) : null}
+        </div>
+      </aside>
+    `;
+  }
+
+  private signaturePanel() {
+    return html`
+      <aside class="insert-panel" aria-label="Signature List">
+        <h2>Signature List</h2>
+        <div class="panel-scroll">
+          <button type="button" class="panel-create" @click=${() => this.openSignatureDialog()}>New Signature</button>
+          ${this.savedSignatures.length ? html`<p class="panel-fold">Signature</p>` : null}
+          ${this.savedSignatures.map(
+            (item) => html`
+              <div class="sign-choice" aria-pressed=${this.armedSignatureId === item.id}>
+                <button type="button" aria-label=${item.name} @click=${() => this.armSignature(item.id)}>
+                  <img src=${item.src} alt="" />
+                </button>
+                <button type="button" class="trash" aria-label=${`Delete ${item.name}`} @click=${() => this.deleteSignature(item.id)}>Delete</button>
+              </div>
+            `,
+          )}
+        </div>
+      </aside>
+    `;
+  }
+
+  private insertPanel() {
+    if (this.mode !== 'insert') return null;
+    if (this.insertKind === 'stamp') return this.stampPanel();
+    if (this.insertKind === 'signature') return this.signaturePanel();
+    return null;
+  }
+
+  private stampDialogView() {
+    if (!this.stampDialog) return null;
+    return html`
+      <div class="word-modal" @click=${(event: Event) => { if (event.target === event.currentTarget) this.stampDialog = false; }}>
+        <form class="word-dialog" role="dialog" aria-label="Create New Stamp" @submit=${(event: Event) => { event.preventDefault(); this.createCustomStamp(); }}>
+          <h2>Create New Stamp</h2>
+          <label class="link-field">
+            Label
+            <input type="text" .value=${this.stampLabel} @input=${(event: Event) => { this.stampLabel = (event.target as HTMLInputElement).value; }} />
+          </label>
+          <div class="color-row" role="radiogroup" aria-label="Stamp color">
+            ${STAMP_COLORS.map(
+              (color) => html`<button type="button" class="ink-dot" style="background:${color}" aria-label=${color} aria-pressed=${this.stampInk === color} @click=${() => { this.stampInk = color; }}></button>`,
+            )}
+          </div>
+          <div class="word-dialog-actions">
+            <button type="button" @click=${() => { this.stampDialog = false; }}>Cancel</button>
+            <button class="primary" type="submit" ?disabled=${this.stampLabel.trim().length === 0}>Create</button>
+          </div>
+        </form>
+      </div>
+    `;
+  }
+
+  private signatureDialogView() {
+    if (!this.signatureOpen) return null;
+    return html`
+      <div class="word-modal" @click=${(event: Event) => { if (event.target === event.currentTarget) this.signatureOpen = false; }}>
+        <div class="word-dialog library-dialog" role="dialog" aria-label="Create New Signature">
+          <h2>Create New Signature</h2>
+          <div class="sign-tabs" role="tablist">
+            ${(['draw', 'type', 'upload'] as const).map(
+              (mode) => html`<button type="button" role="tab" aria-pressed=${this.signatureMode === mode} @click=${() => { this.signatureMode = mode; }}>${mode === 'draw' ? 'Draw' : mode === 'type' ? 'Type' : 'Upload'}</button>`,
+            )}
+          </div>
+          ${this.signatureMode === 'draw'
+            ? html`<canvas class="sign-pad" @pointerdown=${this.onSignDown} @pointermove=${this.onSignMove}></canvas>`
+            : this.signatureMode === 'type'
+              ? html`<input class="sign-type" style="font-family:${this.signatureFont};color:${this.signatureColor}" .value=${this.signatureText} aria-label="Type Signature" @input=${(event: Event) => { this.signatureText = (event.target as HTMLInputElement).value; }} />`
+              : html`
+                  <div
+                    class="sign-drop"
+                    @dragover=${(event: DragEvent) => event.preventDefault()}
+                    @drop=${(event: DragEvent) => {
+                      event.preventDefault();
+                      const file = event.dataTransfer?.files?.[0];
+                      if (file) this.readSignatureFile(file);
+                    }}
+                  >
+                    ${this.signatureUpload ? html`<img src=${this.signatureUpload} alt="" />` : html`<span>Drag & Drop your image here</span><span>Or</span>`}
+                    <button type="button" @click=${() => this.renderRoot.querySelector<HTMLInputElement>('.sign-file')?.click()}>Choose a signature</button>
+                  </div>
+                `}
+          <div class="sign-foot">
+            <span>${this.signatureMode === 'draw' ? 'Draw Signature*' : this.signatureMode === 'type' ? 'Type Signature*' : ''}</span>
+            <button type="button" @click=${() => this.clearSignaturePad()}>Clear</button>
+          </div>
+          <div class="sign-tools">
+            ${this.signatureMode === 'type'
+              ? html`
+                  <select aria-label="Text Styles" @change=${(event: Event) => { this.signatureFont = (event.target as HTMLSelectElement).value; }}>
+                    ${SIGNATURE_FONTS.map((font) => html`<option value=${font.id} ?selected=${font.id === this.signatureFont}>${font.label}</option>`)}
+                  </select>
+                `
+              : null}
+            <span class="color-row">
+              ${SIGNATURE_COLORS.map(
+                (color) => html`<button type="button" class="ink-dot" style="background:${color}" aria-label=${color} aria-pressed=${this.signatureColor === color} @click=${() => { this.signatureColor = color; }}></button>`,
+              )}
+            </span>
+            <span style="flex:1"></span>
+            <button class="primary" type="button" ?disabled=${!this.signatureReady()} @click=${() => this.createSignature()}>Create</button>
+          </div>
+          <input class="sign-file file-input" type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change=${(event: Event) => {
+            const file = (event.target as HTMLInputElement).files?.[0];
+            if (file) this.readSignatureFile(file);
+            (event.target as HTMLInputElement).value = '';
+          }} />
+        </div>
+      </div>
+    `;
+  }
+
   private get pagesPanel() {
     if (!this.pagesPressed) return null;
     return html`
@@ -9010,7 +10319,6 @@ export class PdfEditor extends LitElement {
               </button>
               ${this.viewMenuOpen ? this.viewMenu() : null}
             </div>
-            <button class="icon" type="button" aria-label="Save" ?disabled=${!this.pdf || this.saving} @click=${() => void this.save()}>${iconSave}</button>
             <span class="sep"></span>
             <div class="anchor zoom-root">
               <button
@@ -9130,6 +10438,7 @@ export class PdfEditor extends LitElement {
                     if (mode.id === this.mode) return;
                     this.cancelDraft();
                     this.mode = mode.id;
+                    this.tip = null;
                     if (mode.id !== 'annotate') this.markupKind = null;
                     if (mode.id !== 'shapes') this.shapeKind = null;
                     if (mode.id !== 'insert') this.insertKind = null;
@@ -9222,62 +10531,80 @@ export class PdfEditor extends LitElement {
         </header>
         ${this.mode === 'annotate'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Annotate">
-                ${MARK_TOOLS.map(
-                  (item) => html`
+              <div class="annotate-bar icons" role="toolbar" aria-label="Annotate" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
+                ${ANNOTATE_TOOLS.map((item) => {
+                  const pressed = item.id === 'text' ? this.insertKind === 'text' && this.markupKind === null : this.markupKind === item.id;
+                  const tip = item.shortcut ? `${item.label} (${item.shortcut})` : item.label;
+                  return html`
                     <button
                       type="button"
-                      aria-pressed=${this.markupKind === item.id}
-                      @click=${() => this.chooseMarkup(item.id)}
+                      data-tip=${tip}
+                      aria-label=${item.label}
+                      aria-pressed=${pressed}
+                      @click=${() => this.chooseAnnotate(item.id)}
                     >
-                      ${item.label}
+                      ${item.icon}
                     </button>
-                  `,
-                )}
+                  `;
+                })}
+                <button class="history" type="button" data-tip="Undo" aria-label="Undo" ?disabled=${this.undoCount === 0 || !this.pdf} @click=${() => this.undo()}>${iconUndo}</button>
+                <button class="history" type="button" data-tip="Redo" aria-label="Redo" ?disabled=${this.redoCount === 0 || !this.pdf} @click=${() => this.redo()}>${iconRedo}</button>
+                <button class="eraser" type="button" data-tip="Eraser" aria-label="Eraser" aria-pressed=${this.shapeKind === 'eraser'} @click=${() => this.chooseShape('eraser')}>${iconEraser}</button>
               </div>
             `
           : null}
         ${this.mode === 'shapes'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Shapes">
+              <div class="annotate-bar shapes" role="toolbar" aria-label="Shapes" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
                 ${SHAPE_TOOLS.map(
                   (item) => html`
                     <button
                       type="button"
+                      data-tip=${item.label}
+                      aria-label=${item.label}
                       aria-pressed=${this.shapeKind === item.id}
                       @click=${() => this.chooseShape(item.id)}
                     >
-                      ${item.label}
+                      ${item.icon}
                     </button>
                   `,
                 )}
+                <button type="button" data-tip="Undo" aria-label="Undo" ?disabled=${this.undoCount === 0 || !this.pdf} @click=${() => this.undo()}>${iconUndo}</button>
+                <button type="button" data-tip="Redo" aria-label="Redo" ?disabled=${this.redoCount === 0 || !this.pdf} @click=${() => this.redo()}>${iconRedo}</button>
+                <button type="button" data-tip="Eraser" aria-label="Eraser" aria-pressed=${this.shapeKind === 'eraser'} @click=${() => this.chooseShape('eraser')}>${iconEraser}</button>
               </div>
             `
           : null}
         ${this.mode === 'insert'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Insert">
+              <div class="annotate-bar insert" role="toolbar" aria-label="Insert" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
                 ${INSERT_TOOLS.map(
                   (item) => html`
                     <button
                       type="button"
+                      data-tip=${item.label}
+                      aria-label=${item.label}
                       aria-pressed=${this.insertKind === item.id}
                       @click=${() => this.chooseInsert(item.id)}
                     >
-                      ${item.label}
+                      ${item.icon}
                     </button>
                   `,
                 )}
+                <button class="history" type="button" data-tip="Undo" aria-label="Undo" ?disabled=${this.undoCount === 0 || !this.pdf} @click=${() => this.undo()}>${iconUndo}</button>
+                <button class="history" type="button" data-tip="Redo" aria-label="Redo" ?disabled=${this.redoCount === 0 || !this.pdf} @click=${() => this.redo()}>${iconRedo}</button>
+                <button class="eraser" type="button" data-tip="Eraser" aria-label="Eraser" aria-pressed=${this.shapeKind === 'eraser'} @click=${() => this.chooseShape('eraser')}>${iconEraser}</button>
               </div>
             `
           : null}
         ${this.mode === 'measure'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Measure">
+              <div class="annotate-bar" role="toolbar" aria-label="Measure" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
                 ${MEASURE_TOOLS.map(
                   (item) => html`
                     <button
                       type="button"
+                      data-tip=${item.label}
                       aria-pressed=${this.measureKind === item.id}
                       @click=${() => this.chooseMeasure(item.id)}
                     >
@@ -9290,18 +10617,19 @@ export class PdfEditor extends LitElement {
           : null}
         ${this.mode === 'edit'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Edit">
-                <button type="button" aria-pressed=${this.editText} @click=${() => this.chooseEdit()}>Edit text</button>
+              <div class="annotate-bar" role="toolbar" aria-label="Edit" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
+                <button type="button" data-tip="Edit text" aria-pressed=${this.editText} @click=${() => this.chooseEdit()}>Edit text</button>
               </div>
             `
           : null}
         ${this.mode === 'fill-sign'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Fill and Sign">
+              <div class="annotate-bar" role="toolbar" aria-label="Fill and Sign" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
                 ${SIGN_TOOLS.map(
                   (item) => html`
                     <button
                       type="button"
+                      data-tip=${item.label}
                       aria-pressed=${this.signKind === item.id}
                       @click=${() => this.chooseSign(item.id)}
                     >
@@ -9314,11 +10642,12 @@ export class PdfEditor extends LitElement {
           : null}
         ${this.mode === 'forms'
           ? html`
-              <div class="annotate-bar" role="toolbar" aria-label="Forms">
+              <div class="annotate-bar" role="toolbar" aria-label="Forms" @pointerover=${this.onBarTip} @pointerout=${this.onBarTip}>
                 ${FORM_TOOLS.map(
                   (item) => html`
                     <button
                       type="button"
+                      data-tip=${item.label}
                       aria-pressed=${this.formKind === item.id}
                       @click=${() => this.chooseForm(item.id)}
                     >
@@ -9331,6 +10660,7 @@ export class PdfEditor extends LitElement {
           : null}
         <div class="workspace">
           ${this.stylePanel()}
+          ${this.insertPanel()}
           ${this.pagesPanel}
           <div
             class="viewer ${this.tool === 'hand' ? 'hand' : ''} ${this.panning ? 'panning' : ''} ${this.canDraw ? 'markup' : ''} ${this.markupKind === 'note' ? 'note-tool' : ''} ${!this.canDraw && this.tool === 'select' && !this.editText ? 'select-text' : ''}"
@@ -9339,6 +10669,7 @@ export class PdfEditor extends LitElement {
             @pointermove=${this.onPointerMove}
             @pointerup=${this.onPointerUp}
             @pointercancel=${this.onPointerCancel}
+            @dblclick=${this.onDoubleClick}
             @scroll=${this.onViewerScroll}
           >
             <div class="stage ${this.viewRead === 'scroll' ? 'is-flow' : ''}">
@@ -9489,17 +10820,6 @@ export class PdfEditor extends LitElement {
                       </form>
                     `
                   : null}
-                ${this.stampMenu && this.stampMenu.page === this.currentPage
-                  ? html`
-                      <div class="stamp-menu" style="left:${this.stampMenu.left}px;top:${this.stampMenu.top}px" role="menu">
-                        ${STAMPS.map(
-                          (word) => html`
-                            <button type="button" role="menuitem" @click=${() => this.placeStamp(word)}>${word}</button>
-                          `,
-                        )}
-                      </div>
-                    `
-                  : null}
                             `
                             : html`
                                 <button
@@ -9620,16 +10940,22 @@ export class PdfEditor extends LitElement {
             : null}
         </div>
         <input class="file-input" type="file" accept=${OPEN_ACCEPT} @change=${this.onFileChosen} />
+        <input class="attach-input file-input" type="file" @change=${this.onAttachmentChosen} />
         <input
           class="image-input file-input"
           type="file"
           accept="image/png,image/jpeg,image/gif,image/webp"
           @change=${this.onImageChosen}
         />
+        ${this.stampDialogView()}
+        ${this.signatureDialogView()}
         ${this.linkDialog()}
         ${this.linkConfirmDialog()}
         ${this.settingsDialog()}
         ${this.filterDialog()}
+        ${this.tip
+          ? html`<div class="hover-tip" role="tooltip" style="left:${this.tip.left}px;top:${this.tip.top}px">${this.tip.text}</div>`
+          : nothing}
       </div>
     `;
   }

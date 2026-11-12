@@ -488,9 +488,70 @@ export interface DrawnMark {
   points: Array<{ x: number; y: number }>;
   image?: Uint8Array;
   imageType?: 'png' | 'jpg';
+  file?: Uint8Array;
+  fileName?: string;
   color?: string;
   opacity?: number;
   weight?: number;
+}
+
+export type StampShape = 'badge' | 'arrow' | 'check' | 'cross';
+
+export interface StampStyle {
+  id: string;
+  label: string;
+  shape: StampShape;
+  ink: string;
+  fill: string;
+  text: string;
+}
+
+export const STANDARD_STAMPS: readonly StampStyle[] = [
+  { id: 'approved', label: 'APPROVED', shape: 'badge', ink: '#188038', fill: '#e6f4ea', text: '#188038' },
+  { id: 'as-is', label: 'AS IS', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'completed', label: 'COMPLETED', shape: 'badge', ink: '#188038', fill: '#e6f4ea', text: '#188038' },
+  { id: 'confidential', label: 'CONFIDENTIAL', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'departmental', label: 'DEPARTMENTAL', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'draft', label: 'DRAFT', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'experimental', label: 'EXPERIMENTAL', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'expired', label: 'EXPIRED', shape: 'badge', ink: '#d93025', fill: '#fce8e6', text: '#d93025' },
+  { id: 'final', label: 'FINAL', shape: 'badge', ink: '#188038', fill: '#e6f4ea', text: '#188038' },
+  { id: 'for-comment', label: 'FOR COMMENT', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'for-public-release', label: 'FOR PUBLIC RELEASE', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'information-only', label: 'INFORMATION ONLY', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'not-approved', label: 'NOT APPROVED', shape: 'badge', ink: '#d93025', fill: '#fce8e6', text: '#d93025' },
+  { id: 'not-for-public-release', label: 'NOT FOR PUBLIC RELEASE', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'preliminary-results', label: 'PRELIMINARY RESULTS', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'sold', label: 'SOLD', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'top-secret', label: 'TOP SECRET', shape: 'badge', ink: '#1a73e8', fill: '#e8f0fe', text: '#1a73e8' },
+  { id: 'void', label: 'VOID', shape: 'badge', ink: '#d93025', fill: '#fce8e6', text: '#d93025' },
+  { id: 'sign-here', label: 'SIGN HERE', shape: 'arrow', ink: '#ffffff', fill: '#e25c4c', text: '#ffffff' },
+  { id: 'witness', label: 'WITNESS', shape: 'arrow', ink: '#202124', fill: '#f6d96a', text: '#202124' },
+  { id: 'initial-here', label: 'INITIAL HERE', shape: 'arrow', ink: '#ffffff', fill: '#7e57c2', text: '#ffffff' },
+  { id: 'check', label: 'Check', shape: 'check', ink: '#188038', fill: 'transparent', text: '#188038' },
+  { id: 'cross', label: 'Cross', shape: 'cross', ink: '#d93025', fill: 'transparent', text: '#d93025' },
+];
+
+export function stampFill(ink: string): string {
+  const match = /^#([0-9a-f]{6})$/i.exec(ink);
+  if (!match) return '#e8f0fe';
+  const value = Number.parseInt(match[1], 16);
+  const mix = (channel: number) => Math.round(channel + (255 - channel) * 0.86);
+  const channels = [mix((value >> 16) & 255), mix((value >> 8) & 255), mix(value & 255)];
+  return `#${channels.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
+}
+
+export function stampStyle(label: string, ink = '#1a73e8'): StampStyle {
+  const found = STANDARD_STAMPS.find((item) => item.label.toUpperCase() === label.toUpperCase());
+  if (found) return found;
+  return { id: 'custom', label, shape: 'badge', ink, fill: stampFill(ink), text: ink };
+}
+
+export function stampSize(style: StampStyle): { width: number; height: number } {
+  if (style.shape === 'check' || style.shape === 'cross') return { width: 28, height: 28 };
+  const letters = Math.max(style.label.length, 2);
+  if (style.shape === 'arrow') return { width: Math.max(112, letters * 6.4 + 36), height: 26 };
+  return { width: Math.max(78, letters * 6.6 + 22), height: 24 };
 }
 
 function paintOf(hex: string | undefined, fallback: RGB): RGB {
@@ -512,15 +573,34 @@ const hairline = rgb(0.855, 0.863, 0.878);
 export async function applyMarks(bytes: Uint8Array, marks: DrawnMark[]): Promise<Uint8Array> {
   const doc = await PDFDocument.load(bytes);
   const font = await doc.embedFont(StandardFonts.Helvetica);
+  const bold = await doc.embedFont(StandardFonts.HelveticaBold);
+  const usedNames = new Set<string>();
   for (const mark of marks) {
+    if (mark.kind === 'file' && mark.file) await doc.attach(mark.file, uniqueFileName(usedNames, mark.fileName || mark.text || 'attachment'));
     const page = doc.getPages()[mark.page - 1];
     if (!page) continue;
-    await drawSavedMark(doc, page, font, mark);
+    await drawSavedMark(doc, page, font, bold, mark);
   }
   return doc.save();
 }
 
-async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mark: DrawnMark): Promise<void> {
+function uniqueFileName(used: Set<string>, name: string): string {
+  const clean = name.replace(/[\\/:*?"<>|]/g, ' ').trim() || 'attachment';
+  if (!used.has(clean)) {
+    used.add(clean);
+    return clean;
+  }
+  let count = 2;
+  let next = `${count} ${clean}`;
+  while (used.has(next)) {
+    count += 1;
+    next = `${count} ${clean}`;
+  }
+  used.add(next);
+  return next;
+}
+
+async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, bold: PDFFont, mark: DrawnMark): Promise<void> {
   const rect = mark.rects[0];
   const stroke = 1.5;
   if (mark.kind === 'highlight') {
@@ -534,6 +614,13 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
     const thickness = mark.weight ?? 2;
     const opacity = mark.opacity ?? 1;
     for (const box of mark.rects) page.drawLine({ start: { x: box.x, y: box.y }, end: { x: box.x + box.width, y: box.y }, thickness, color, opacity });
+    return;
+  }
+  if (mark.kind === 'squiggly') {
+    const color = paintOf(mark.color, red);
+    const thickness = mark.weight ?? 1.25;
+    const opacity = mark.opacity ?? 1;
+    for (const box of mark.rects) drawSquiggle(page, box, color, thickness, opacity);
     return;
   }
   if (mark.kind === 'strike') {
@@ -550,6 +637,20 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
     for (const box of mark.rects) {
       page.drawRectangle({ x: box.x, y: box.y, width: box.width, height: box.height, color: pin, opacity: 0.35 });
     }
+    return;
+  }
+  if (mark.kind === 'freehand-highlight') {
+    drawPolyline(page, mark.points, paintOf(mark.color, yellow), mark.weight ?? 12, mark.opacity ?? 0.45);
+    return;
+  }
+  if (mark.kind === 'arc' || mark.kind === 'polyline') {
+    drawPolyline(page, mark.points, ink, stroke);
+    return;
+  }
+  if (mark.kind === 'cloud' && mark.points.length >= 3) {
+    const height = page.getHeight();
+    const path = svgPath(cloudOutline(mark.points, 8), height, true);
+    page.drawSvgPath(path, { x: 0, y: height, borderColor: ink, borderWidth: stroke });
     return;
   }
   if (mark.kind === 'pen' || mark.kind === 'signature' || mark.kind === 'line' || mark.kind === 'distance' || mark.kind === 'perimeter') {
@@ -603,8 +704,17 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
     page.drawImage(image, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
     return;
   }
+  if (mark.kind === 'signature' && rect && mark.image && mark.imageType) {
+    const image = mark.imageType === 'png' ? await doc.embedPng(mark.image) : await doc.embedJpg(mark.image);
+    page.drawImage(image, { x: rect.x, y: rect.y, width: rect.width, height: rect.height });
+    return;
+  }
   if (mark.kind === 'stamp' && rect) {
-    drawBoxedText(page, font, mark.text.toUpperCase(), rect.x, rect.y, 12, red, red);
+    drawStamp(page, bold, mark, page.getHeight());
+    return;
+  }
+  if (mark.kind === 'file' && rect) {
+    drawPaperclip(page, rect, page.getHeight());
     return;
   }
   if (rect && (mark.kind === 'freetext' || mark.kind === 'text' || mark.kind === 'initials' || mark.kind === 'date')) {
@@ -614,10 +724,72 @@ async function drawSavedMark(doc: PDFDocument, page: PDFPage, font: PDFFont, mar
   }
 }
 
-function drawPolyline(page: PDFPage, points: Array<{ x: number; y: number }>, color: RGB, thickness: number): void {
-  for (let index = 1; index < points.length; index += 1) {
-    page.drawLine({ start: points[index - 1], end: points[index], thickness, color });
+function drawSquiggle(
+  page: PDFPage,
+  box: { x: number; y: number; width: number },
+  color: RGB,
+  thickness: number,
+  opacity: number,
+): void {
+  const points: Array<{ x: number; y: number }> = [];
+  const end = box.x + box.width;
+  const base = box.y + 1;
+  const step = 1.6;
+  for (let x = box.x; x <= end + 0.01; x += step) {
+    const along = Math.min(x, end) - box.x;
+    points.push({ x: Math.min(x, end), y: base + Math.sin(along / 1.7) * 1.15 });
   }
+  drawPolyline(page, points, color, thickness, opacity);
+}
+
+function drawPolyline(page: PDFPage, points: Array<{ x: number; y: number }>, color: RGB, thickness: number, opacity = 1): void {
+  for (let index = 1; index < points.length; index += 1) {
+    page.drawLine({ start: points[index - 1], end: points[index], thickness, color, opacity });
+  }
+}
+
+/** Scallops around a closed shape. The radius is in the same space as the corners. */
+export function cloudOutline(corners: Array<{ x: number; y: number }>, radius: number): Array<{ x: number; y: number }> {
+  if (corners.length < 3) return corners.map((point) => ({ ...point }));
+  const bumpRadius = Math.max(radius, 1);
+  const center = {
+    x: corners.reduce((sum, point) => sum + point.x, 0) / corners.length,
+    y: corners.reduce((sum, point) => sum + point.y, 0) / corners.length,
+  };
+  const outline: Array<{ x: number; y: number }> = [];
+  for (let index = 0; index < corners.length; index += 1) {
+    const start = corners[index];
+    const end = corners[(index + 1) % corners.length];
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 0.5) continue;
+    const bumps = Math.max(1, Math.round(length / (bumpRadius * 2)));
+    const ux = dx / length;
+    const uy = dy / length;
+    let nx = -uy;
+    let ny = ux;
+    const midX = (start.x + end.x) / 2;
+    const midY = (start.y + end.y) / 2;
+    if (nx * (center.x - midX) + ny * (center.y - midY) > 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const step = length / bumps;
+    const curve = step / 2;
+    for (let bump = 0; bump < bumps; bump += 1) {
+      const cx = start.x + ux * (bump + 0.5) * step;
+      const cy = start.y + uy * (bump + 0.5) * step;
+      const samples = 6;
+      for (let sample = 0; sample <= samples; sample += 1) {
+        const theta = Math.PI - (Math.PI * sample) / samples;
+        const along = Math.cos(theta);
+        const side = Math.sin(theta);
+        outline.push({ x: cx + along * curve * ux + side * curve * nx, y: cy + along * curve * uy + side * curve * ny });
+      }
+    }
+  }
+  return outline;
 }
 
 function drawArrow(page: PDFPage, from: { x: number; y: number }, to: { x: number; y: number }, color: RGB, thickness: number): void {
@@ -696,6 +868,20 @@ export async function deleteDocumentPages(bytes: Uint8Array, pages: number[]): P
   return doc.save();
 }
 
+/** Crops one page to a rectangle in PDF user space. */
+export async function cropDocumentPage(bytes: Uint8Array, pageNumber: number, rect: PdfRect): Promise<Uint8Array> {
+  const doc = await PDFDocument.load(bytes);
+  const page = doc.getPages()[pageNumber - 1];
+  if (!page) throw new Error('Could not crop this page.');
+  const x = Math.max(0, Math.min(rect.x, page.getWidth() - 8));
+  const y = Math.max(0, Math.min(rect.y, page.getHeight() - 8));
+  const width = Math.max(8, Math.min(rect.width, page.getWidth() - x));
+  const height = Math.max(8, Math.min(rect.height, page.getHeight() - y));
+  page.setCropBox(x, y, width, height);
+  page.setMediaBox(x, y, width, height);
+  return doc.save();
+}
+
 /** Replaces one page with the first page of another PDF. */
 export async function replaceDocumentPage(bytes: Uint8Array, pageNumber: number, source: Uint8Array): Promise<Uint8Array> {
   const doc = await PDFDocument.load(bytes);
@@ -719,6 +905,99 @@ export async function extractDocumentPages(bytes: Uint8Array, pages: number[]): 
   const copied = await next.copyPages(doc, order.map((page) => page - 1));
   copied.forEach((page) => next.addPage(page));
   return next.save();
+}
+
+function drawStamp(page: PDFPage, font: PDFFont, mark: DrawnMark, pageHeight: number): void {
+  const rect = mark.rects[0];
+  if (!rect) return;
+  const style = stampStyle(mark.text, mark.color);
+  const border = paintOf(style.ink, blue);
+  const fill = paintOf(style.fill, rgb(1, 1, 1));
+  const text = paintOf(style.text, border);
+  if (style.shape === 'badge' || style.shape === 'arrow') {
+    const path = style.shape === 'arrow' ? arrowPath(rect, pageHeight) : roundedRectPath(rect, 4, pageHeight);
+    page.drawSvgPath(path, { x: 0, y: pageHeight, color: fill, borderColor: style.shape === 'arrow' ? fill : border, borderWidth: style.shape === 'arrow' ? 0.5 : 1.4 });
+    const size = 8;
+    const width = font.widthOfTextAtSize(style.label, size);
+    const textX = style.shape === 'arrow' ? rect.x + (rect.width + 12 - width) / 2 : rect.x + (rect.width - width) / 2;
+    page.drawText(style.label, { x: textX, y: rect.y + (rect.height - size) / 2, size, font, color: text });
+    return;
+  }
+  const path = style.shape === 'check' ? checkPath(rect, pageHeight) : crossPath(rect, pageHeight);
+  page.drawSvgPath(path, { x: 0, y: pageHeight, borderColor: border, borderWidth: 2.2 });
+}
+
+function roundedRectPath(rect: PdfRect, radius: number, pageHeight: number): string {
+  const r = Math.min(radius, rect.width / 2, rect.height / 2);
+  const left = rect.x;
+  const right = rect.x + rect.width;
+  const top = pageHeight - (rect.y + rect.height);
+  const bottom = pageHeight - rect.y;
+  return `M ${left + r} ${top} H ${right - r} Q ${right} ${top} ${right} ${top + r} V ${bottom - r} Q ${right} ${bottom} ${right - r} ${bottom} H ${left + r} Q ${left} ${bottom} ${left} ${bottom - r} V ${top + r} Q ${left} ${top} ${left + r} ${top} Z`;
+}
+
+function arrowPath(rect: PdfRect, pageHeight: number): string {
+  const notch = Math.min(14, rect.width * 0.22);
+  const points = [
+    { x: rect.x + notch, y: rect.y + rect.height },
+    { x: rect.x + rect.width, y: rect.y + rect.height },
+    { x: rect.x + rect.width, y: rect.y },
+    { x: rect.x + notch, y: rect.y },
+    { x: rect.x, y: rect.y + rect.height / 2 },
+  ];
+  return svgPath(points, pageHeight, true);
+}
+
+function checkPath(rect: PdfRect, pageHeight: number): string {
+  const points = [
+    { x: rect.x + rect.width * 0.18, y: rect.y + rect.height * 0.48 },
+    { x: rect.x + rect.width * 0.4, y: rect.y + rect.height * 0.24 },
+    { x: rect.x + rect.width * 0.84, y: rect.y + rect.height * 0.76 },
+  ];
+  return svgPath(points, pageHeight, false);
+}
+
+function crossPath(rect: PdfRect, pageHeight: number): string {
+  const inset = rect.width * 0.22;
+  const first = svgPath(
+    [
+      { x: rect.x + inset, y: rect.y + rect.height - inset },
+      { x: rect.x + rect.width - inset, y: rect.y + inset },
+    ],
+    pageHeight,
+    false,
+  );
+  const second = svgPath(
+    [
+      { x: rect.x + inset, y: rect.y + inset },
+      { x: rect.x + rect.width - inset, y: rect.y + rect.height - inset },
+    ],
+    pageHeight,
+    false,
+  );
+  return `${first} ${second}`;
+}
+
+function drawPaperclip(page: PDFPage, rect: PdfRect, pageHeight: number): void {
+  const left = rect.x + rect.width * 0.32;
+  const right = rect.x + rect.width * 0.7;
+  const top = rect.y + rect.height * 0.82;
+  const bottom = rect.y + rect.height * 0.16;
+  const mid = rect.x + rect.width * 0.5;
+  const path = svgPath(
+    [
+      { x: mid, y: bottom },
+      { x: left, y: bottom + rect.height * 0.12 },
+      { x: left, y: top },
+      { x: right, y: top },
+      { x: right, y: bottom + rect.height * 0.28 },
+      { x: mid, y: bottom + rect.height * 0.28 },
+      { x: mid, y: top - rect.height * 0.16 },
+    ],
+    pageHeight,
+    false,
+  );
+  page.drawSvgPath(path, { x: 0, y: pageHeight, borderColor: ink, borderWidth: 1.4 });
 }
 
 function drawBoxedText(page: PDFPage, font: PDFFont, text: string, x: number, top: number, size: number, color: RGB, border: RGB): void {
