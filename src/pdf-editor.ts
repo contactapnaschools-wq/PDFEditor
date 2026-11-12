@@ -52,6 +52,7 @@ import {
   type TextRun,
   type ViewportBox,
 } from './pdf-engine';
+import { renderSheetPages } from './sheet-preview';
 import { renderSlidePages } from './slide-preview';
 import { isZipDocument, renderDocxPages } from './word-preview';
 
@@ -305,7 +306,7 @@ const MODES: ReadonlyArray<{ id: EditorMode; label: string }> = [
 const ZOOM_STEPS = [0.25, 0.5, 0.65, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4];
 
 const OPEN_ACCEPT =
-  'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,.png,.jpg,.jpeg,image/png,image/jpeg';
+  'application/pdf,.pdf,.doc,.docx,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.ppt,.pptx,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,.xls,.xlsx,.xlsm,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,.png,.jpg,.jpeg,image/png,image/jpeg';
 const WORD_ZOOM_LEVELS = [2, 1.5, 1, 0.75, 0.5] as const;
 
 type WordFit = 'percent' | 'page' | 'width';
@@ -343,6 +344,28 @@ function slideFormat(source: PdfSource): SlideFormat | null {
     const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
     if (path.endsWith('.pptx')) return 'pptx';
     if (path.endsWith('.ppt')) return 'ppt';
+  }
+  return null;
+}
+
+type SheetFormat = 'xlsx' | 'xlsm' | 'xls';
+
+function sheetFormat(source: PdfSource): SheetFormat | null {
+  if (source instanceof File) {
+    const name = source.name.toLowerCase();
+    if (name.endsWith('.xlsx')) return 'xlsx';
+    if (name.endsWith('.xlsm')) return 'xlsm';
+    if (name.endsWith('.xls')) return 'xls';
+    if (source.type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') return 'xlsx';
+    if (source.type === 'application/vnd.ms-excel.sheet.macroEnabled.12') return 'xlsm';
+    if (source.type === 'application/vnd.ms-excel') return 'xls';
+    return null;
+  }
+  if (typeof source === 'string') {
+    const path = decodeURIComponent(source.split(/[?#]/)[0]).toLowerCase();
+    if (path.endsWith('.xlsx')) return 'xlsx';
+    if (path.endsWith('.xlsm')) return 'xlsm';
+    if (path.endsWith('.xls')) return 'xls';
   }
   return null;
 }
@@ -2445,6 +2468,61 @@ export class PdfEditor extends LitElement {
 
     .word-pages .preview-slide[hidden] { display: none !important; }
 
+    .word-pages .preview-sheet {
+      box-sizing: border-box;
+      min-width: 640px;
+      padding: 28px 32px 36px;
+      background: #fff;
+      color: #202124;
+    }
+
+    .word-pages .preview-sheet[hidden] { display: none !important; }
+
+    .word-pages .sheet-name {
+      margin: 0 0 16px;
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .word-pages .sheet-table {
+      border-collapse: collapse;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+
+    .word-pages .sheet-table th,
+    .word-pages .sheet-table td {
+      border: 1px solid #e0e3e7;
+      padding: 6px 10px;
+      min-width: 28px;
+      max-width: 280px;
+      white-space: pre-wrap;
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .word-pages .sheet-table th {
+      min-width: 72px;
+      background: #f8f9fa;
+      color: #5f6368;
+      font-weight: 650;
+      text-align: center;
+    }
+
+    .word-pages .sheet-table tbody th { min-width: 36px; }
+
+    .word-pages .sheet-table td {
+      background: #fff;
+      color: #202124;
+    }
+
+    .word-pages .sheet-note,
+    .word-pages .sheet-empty {
+      margin: 12px 0 0;
+      color: #5f6368;
+      font-size: 13px;
+    }
+
     .word-bar {
       flex: none;
       height: 44px;
@@ -3019,7 +3097,7 @@ export class PdfEditor extends LitElement {
   @state() private loading = false;
   @state() private errorMessage = '';
   @state() private pageReady = false;
-  @state() private documentKind: 'pdf' | 'word' | 'image' | 'slides' = 'pdf';
+  @state() private documentKind: 'pdf' | 'word' | 'image' | 'slides' | 'sheets' = 'pdf';
   @state() private wordFit: WordFit = 'percent';
   @state() private wordPercent = 1;
   @state() private wordScaleLabel = 100;
@@ -3300,7 +3378,7 @@ export class PdfEditor extends LitElement {
     }
   }
 
-  /** Open a PDF, or preview a Word document, presentation, or image, from a URL, a File, or binary data. */
+  /** Open a PDF, or preview a Word document, presentation, spreadsheet, or image, from a URL, a File, or binary data. */
   async load(source: PdfSource): Promise<void> {
     if (imageFormat(source)) {
       await this.loadImage(source);
@@ -3308,6 +3386,10 @@ export class PdfEditor extends LitElement {
     }
     if (slideFormat(source)) {
       await this.loadSlides(source);
+      return;
+    }
+    if (sheetFormat(source)) {
+      await this.loadSheets(source);
       return;
     }
     if (wordFormat(source)) {
@@ -3552,6 +3634,65 @@ export class PdfEditor extends LitElement {
     }
   }
 
+  private async loadSheets(source: PdfSource): Promise<void> {
+    const id = ++this.loadId;
+    const format = sheetFormat(source);
+    this.documentKind = 'sheets';
+    this.loading = true;
+    this.errorMessage = '';
+    this.pageReady = false;
+    this.wordMenuOpen = false;
+    this.wordZoomOpen = false;
+    this.wordFit = 'percent';
+    this.wordPercent = 1;
+    this.wordScaleLabel = 100;
+    this.wordZoomDraft = 1;
+    this.totalPages = 0;
+    this.currentPage = 1;
+    this.wordBytes = null;
+    this.clearImagePreview();
+    this.clearSearch();
+    this.releasePdf();
+
+    try {
+      const bytes = await this.sourceBytes(source, 'Could not read this spreadsheet.');
+      if (id !== this.loadId) return;
+      if ((format === 'xlsx' || format === 'xlsm') && !isZipDocument(bytes)) {
+        throw new Error('Could not open this spreadsheet.');
+      }
+      this.wordBytes = bytes;
+      this.downloadName = this.sheetFileName(source);
+      const generation = ++this.wordGeneration;
+      await this.updateComplete;
+      if (id !== this.loadId || this.documentKind !== 'sheets') return;
+      await this.paintSheets(generation);
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.dispatchEvent(
+        new CustomEvent<PdfLoadDetail>('pdf-load', {
+          detail: { pages: this.totalPages },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    } catch (error) {
+      if (id !== this.loadId) return;
+      this.loading = false;
+      this.pageReady = false;
+      this.wordBytes = null;
+      this.totalPages = 0;
+      const message = this.sheetErrorText(error);
+      this.errorMessage = message;
+      this.dispatchEvent(
+        new CustomEvent<PdfErrorDetail>('pdf-error', {
+          detail: { message },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
+
   private async loadImage(source: PdfSource): Promise<void> {
     const format = imageFormat(source);
     const id = ++this.loadId;
@@ -3631,7 +3772,7 @@ export class PdfEditor extends LitElement {
   }
 
   private isReadOnlyPreview(): boolean {
-    return this.documentKind === 'word' || this.documentKind === 'image' || this.documentKind === 'slides';
+    return this.documentKind === 'word' || this.documentKind === 'image' || this.documentKind === 'slides' || this.documentKind === 'sheets';
   }
 
   private clearImagePreview(): void {
@@ -3703,6 +3844,25 @@ export class PdfEditor extends LitElement {
     return 'Could not open this presentation.';
   }
 
+  private sheetFileName(source: PdfSource): string {
+    if (typeof source === 'string') {
+      const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
+      if (/\.xls[xm]?$/i.test(part)) return part;
+    }
+    if (source instanceof File && /\.xls[xm]?$/i.test(source.name)) return source.name;
+    return 'workbook.xlsx';
+  }
+
+  private sheetErrorText(error: unknown): string {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Could not') || error.message.includes('.xls') || error.message.includes('no sheets'))
+    ) {
+      return error.message;
+    }
+    return 'Could not open this spreadsheet.';
+  }
+
   private wordFileName(source: PdfSource): string {
     if (typeof source === 'string') {
       const part = decodeURIComponent(source.split(/[?#]/)[0]).split(/[/\\]/).pop() ?? '';
@@ -3754,6 +3914,22 @@ export class PdfEditor extends LitElement {
     this.layoutWord();
   }
 
+  private async paintSheets(generation: number): Promise<void> {
+    if (!this.wordBytes) throw new Error('Could not open this spreadsheet.');
+    const scratch = document.createElement('div');
+    const count = renderSheetPages(this.wordBytes, scratch);
+    if (generation !== this.wordGeneration || this.documentKind !== 'sheets') return;
+    const body = this.renderRoot.querySelector('.word-pages');
+    if (!(body instanceof HTMLElement)) throw new Error('Could not open this spreadsheet.');
+    if (count < 1) throw new Error('This spreadsheet has no sheets to preview.');
+    body.replaceChildren(...scratch.childNodes);
+    this.totalPages = count;
+    this.currentPage = 1;
+    this.pageReady = true;
+    await this.updateComplete;
+    this.layoutWord();
+  }
+
   private layoutWord(): void {
     if (!this.isReadOnlyPreview()) return;
     const stage = this.renderRoot.querySelector('.word-stage');
@@ -3768,9 +3944,7 @@ export class PdfEditor extends LitElement {
       this.applyPreviewScale(stage, frame, host, image.naturalWidth, image.naturalHeight);
       return;
     }
-    const pages = [
-      ...(this.documentKind === 'slides' ? host.querySelectorAll('.preview-slide') : host.querySelectorAll('section.docx')),
-    ] as HTMLElement[];
+    const pages = this.previewPageNodes(host);
     if (pages.length === 0) return;
     const index = Math.min(Math.max(this.currentPage, 1), pages.length) - 1;
     pages.forEach((page, pageIndex) => {
@@ -3778,6 +3952,12 @@ export class PdfEditor extends LitElement {
     });
     const page = pages[index];
     this.applyPreviewScale(stage, frame, host, page.offsetWidth, page.offsetHeight);
+  }
+
+  private previewPageNodes(host: ParentNode): HTMLElement[] {
+    const selector =
+      this.documentKind === 'slides' ? '.preview-slide' : this.documentKind === 'sheets' ? '.preview-sheet' : 'section.docx';
+    return [...host.querySelectorAll(selector)] as HTMLElement[];
   }
 
   private applyPreviewScale(stage: HTMLElement, frame: HTMLElement, host: HTMLElement, naturalW: number, naturalH: number): void {
@@ -3879,6 +4059,9 @@ export class PdfEditor extends LitElement {
     if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
     if (lower.endsWith('.pptx')) return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
     if (lower.endsWith('.ppt')) return 'application/vnd.ms-powerpoint';
+    if (lower.endsWith('.xlsx')) return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    if (lower.endsWith('.xlsm')) return 'application/vnd.ms-excel.sheet.macroEnabled.12';
+    if (lower.endsWith('.xls')) return 'application/vnd.ms-excel';
     if (lower.endsWith('.doc') && !lower.endsWith('.docx')) return 'application/msword';
     return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
   }
@@ -3963,14 +4146,20 @@ export class PdfEditor extends LitElement {
       section.docx { break-after: page; box-shadow: none !important; margin: 0 auto !important; }
       img.preview-image { display: block; max-width: 100%; height: auto; margin: 0 auto; }
       .preview-slide { break-after: page; margin: 0 auto 12px !important; position: relative !important; }
+      .preview-sheet { break-after: page; }
+      .sheet-name { font: 650 15px sans-serif; margin: 0 0 12px; }
+      .sheet-table { border-collapse: collapse; font: 13px sans-serif; }
+      .sheet-table th, .sheet-table td { border: 1px solid #ccc; padding: 4px 8px; vertical-align: top; }
+      .sheet-note, .sheet-empty { color: #5f6368; font: 13px sans-serif; }
     `;
     doc.head.append(style);
     if (this.documentKind === 'image') {
       const image = this.renderRoot.querySelector('img.preview-image');
       if (image) doc.body.append(doc.importNode(image, true));
-    } else if (this.documentKind === 'slides') {
+    } else if (this.documentKind === 'slides' || this.documentKind === 'sheets') {
       const frameElement = doc.defaultView?.Element;
-      this.renderRoot.querySelectorAll('.word-pages .preview-slide').forEach((node) => {
+      const selector = this.documentKind === 'slides' ? '.word-pages .preview-slide' : '.word-pages .preview-sheet';
+      this.renderRoot.querySelectorAll(selector).forEach((node) => {
         const copy = this.clonePreviewNode(node, doc);
         if (frameElement && copy instanceof frameElement) copy.removeAttribute('hidden');
         doc.body.append(copy);
@@ -4137,10 +4326,12 @@ export class PdfEditor extends LitElement {
     if (this.loading) {
       if (this.documentKind === 'image') return 'Opening image…';
       if (this.documentKind === 'slides') return 'Opening presentation…';
+      if (this.documentKind === 'sheets') return 'Opening spreadsheet…';
       return 'Opening document…';
     }
     if (this.documentKind === 'image') return 'Open an image to preview it.';
     if (this.documentKind === 'slides') return 'Open a presentation to preview it.';
+    if (this.documentKind === 'sheets') return 'Open a spreadsheet to preview it.';
     return 'Open a Word document to preview it.';
   }
 
@@ -4380,7 +4571,7 @@ export class PdfEditor extends LitElement {
                   ${this.previewStatus()}
                 </div>
               `}
-          ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, or image</div>` : null}
+          ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, spreadsheet, or image</div>` : null}
         </div>
         <footer class="word-bar">
           <div class="word-page">
@@ -9527,10 +9718,10 @@ export class PdfEditor extends LitElement {
               ? null
               : html`
                   <div class="status ${this.errorMessage ? 'error' : ''}">
-                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF, Word document, presentation, or image to start viewing.')}
+                    ${this.errorMessage || (this.loading ? 'Opening PDF…' : 'Open a PDF, Word document, presentation, spreadsheet, or image to start viewing.')}
                   </div>
                 `}
-            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, or image</div>` : null}
+            ${this.dragOver ? html`<div class="drop-hint">Drop a PDF, Word document, presentation, spreadsheet, or image</div>` : null}
           </div>
           ${this.commentsOpen
             ? html`
